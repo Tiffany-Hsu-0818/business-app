@@ -171,28 +171,19 @@ def main():
             price = st.number_input("完稅價格", min_value=0, step=1000)
 
         st.markdown("---")
-        
-        # ⭐⭐ 關鍵修改區：階段選擇 & 交期選填 ⭐⭐
-        st.write("⚙️ **案件細節設定**")
-        
-        # 1. 讓使用者選擇要產生哪些階段 (不再強制產生 5 行)
-        all_stages = ["交貨", "製造", "運輸", "安裝", "尾款"]
-        selected_stages = st.multiselect(
-            "請選擇本案需要的階段 (沒選的不會產生)", 
-            all_stages, 
-            default=["交貨"]
-        )
-
-        st.write("") # 排版空白
-
         d1, d2, d3 = st.columns(3)
-        with d1: 
-            # 2. 讓預定交期變成選填 (有勾選才填)
-            has_delivery = st.checkbox("已有預定交期?", value=True) # 預設勾選
+        
+        # ⭐⭐ 這裡就是您要的功能 ⭐⭐
+        with d1:
+            # 1. 先問有沒有預定交期
+            has_delivery = st.checkbox("已有預定交期?", value=True) # 預設打勾
+            
+            # 2. 有打勾 -> 顯示日期選擇器
             if has_delivery:
                 ex_del = st.date_input("🚚 預定交期", datetime.today())
             else:
-                ex_del = None # 沒勾選就是空值
+                # 沒打勾 -> 隱藏選單，且數值為 None
+                ex_del = None
 
         with d2: 
             has_inv = st.checkbox("已有發票日期?")
@@ -233,24 +224,29 @@ def main():
         if submit:
             if not final_client or price == 0:
                 st.error("❌ 資料不完整：請確認客戶名稱與金額")
-            elif not selected_stages:
-                st.error("❌ 請至少選擇一個階段 (例如：交貨)")
             else:
+                # 回復成原本的 5 個固定階段
+                stages = ["交貨", "製造", "運輸", "安裝", "尾款"]
                 rows = []
                 ds = input_date.strftime("%Y-%m-%d")
                 
-                # 處理日期字串 (如果是 None 就變成空字串)
-                eds = ex_del.strftime("%Y-%m-%d") if has_delivery and ex_del else ""
+                # ⭐⭐ 寫入邏輯 ⭐⭐
+                # 如果 has_delivery 是 True (有勾選)，就填入 ex_del 的日期
+                # 否則填入空白字串 ""
+                if has_delivery and ex_del:
+                    eds = ex_del.strftime("%Y-%m-%d")
+                else:
+                    eds = ""
+
                 ids = inv_d.strftime("%Y-%m-%d") if has_inv else ""
                 pds = pay_d.strftime("%Y-%m-%d") if has_pay else ""
 
-                # ⭐ 這裡只迴圈使用者「選到」的階段 ⭐
-                for i, s in enumerate(selected_stages):
+                for i, s in enumerate(stages):
                     rows.append([
                         next_id if i==0 else "", ds if i==0 else "",
                         final_cat if i==0 else "", final_client if i==0 else "",
                         project_no if i==0 else "", "", s, "",
-                        price if i==0 else "", eds if i==0 else "",
+                        price if i==0 else "", eds if i==0 else "", # 這裡會根據勾選填入日期或空白
                         "", ids if i==0 else "", "",
                         pds if i==0 else "",
                         final_ex if i==0 else "", 
