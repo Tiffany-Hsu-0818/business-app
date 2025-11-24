@@ -171,26 +171,29 @@ def main():
             price = st.number_input("完稅價格", min_value=0, step=1000)
 
         st.markdown("---")
-        d1, d2, d3 = st.columns(3)
         
-        # ⭐⭐ 這裡就是您要的功能 ⭐⭐
-        with d1:
-            # 1. 先問有沒有預定交期
-            has_delivery = st.checkbox("已有預定交期?", value=True) # 預設打勾
-            
-            # 2. 有打勾 -> 顯示日期選擇器
+        # ⭐⭐ 日期控制區：預設全部不勾選，避免產生幽靈日期 ⭐⭐
+        d1, d2, d3 = st.columns(3)
+        with d1: 
+            has_delivery = st.checkbox("已有預定交期?", value=False) # 預設 False
             if has_delivery:
                 ex_del = st.date_input("🚚 預定交期", datetime.today())
             else:
-                # 沒打勾 -> 隱藏選單，且數值為 None
                 ex_del = None
 
         with d2: 
-            has_inv = st.checkbox("已有發票日期?")
-            inv_d = st.date_input("🧾 發票日期", datetime.today()) if has_inv else None
+            has_inv = st.checkbox("已有發票日期?", value=False) # 預設 False
+            if has_inv:
+                inv_d = st.date_input("🧾 發票日期", datetime.today())
+            else:
+                inv_d = None
+
         with d3:
-            has_pay = st.checkbox("已有收款日期?")
-            pay_d = st.date_input("💰 收款日期", datetime.today()) if has_pay else None
+            has_pay = st.checkbox("已有收款日期?", value=False) # 預設 False
+            if has_pay:
+                pay_d = st.date_input("💰 收款日期", datetime.today())
+            else:
+                pay_d = None
 
         st.markdown("---")
         st.write("💱 **進出口匯率**")
@@ -225,33 +228,38 @@ def main():
             if not final_client or price == 0:
                 st.error("❌ 資料不完整：請確認客戶名稱與金額")
             else:
-                # 回復成原本的 5 個固定階段
-                stages = ["交貨", "製造", "運輸", "安裝", "尾款"]
+                # ⭐⭐ 寫入邏輯修正：只寫入一行，且不含「階段」文字 ⭐⭐
                 rows = []
                 ds = input_date.strftime("%Y-%m-%d")
                 
-                # ⭐⭐ 寫入邏輯 ⭐⭐
-                # 如果 has_delivery 是 True (有勾選)，就填入 ex_del 的日期
-                # 否則填入空白字串 ""
-                if has_delivery and ex_del:
-                    eds = ex_del.strftime("%Y-%m-%d")
-                else:
-                    eds = ""
+                # 日期處理：嚴格檢查勾選狀態
+                eds = ex_del.strftime("%Y-%m-%d") if has_delivery and ex_del else ""
+                ids = inv_d.strftime("%Y-%m-%d") if has_inv and inv_d else ""
+                pds = pay_d.strftime("%Y-%m-%d") if has_pay and pay_d else ""
 
-                ids = inv_d.strftime("%Y-%m-%d") if has_inv else ""
-                pds = pay_d.strftime("%Y-%m-%d") if has_pay else ""
-
-                for i, s in enumerate(stages):
-                    rows.append([
-                        next_id if i==0 else "", ds if i==0 else "",
-                        final_cat if i==0 else "", final_client if i==0 else "",
-                        project_no if i==0 else "", "", s, "",
-                        price if i==0 else "", eds if i==0 else "", # 這裡會根據勾選填入日期或空白
-                        "", ids if i==0 else "", "",
-                        pds if i==0 else "",
-                        final_ex if i==0 else "", 
-                        "", remark if i==0 else ""
-                    ])
+                # 建立單筆資料 (對應 Google Sheet 欄位順序)
+                # 注意 index 6 (階段) 這裡直接給空字串 ""
+                row_data = [
+                    next_id,            # 0: 編號
+                    ds,                 # 1: 日期
+                    final_cat,          # 2: 類別
+                    final_client,       # 3: 客戶
+                    project_no,         # 4: 案號
+                    "",                 # 5: 空
+                    "",                 # 6: 階段 (⭐強制空白，不再寫入交貨/製造等字)
+                    "",                 # 7: 空
+                    price,              # 8: 完稅價格
+                    eds,                # 9: 預定交期 (沒勾就是空白)
+                    "",                 # 10: 空
+                    ids,                # 11: 發票日期 (沒勾就是空白)
+                    "",                 # 12: 空
+                    pds,                # 13: 收款日期 (沒勾就是空白)
+                    final_ex,           # 14: 匯率
+                    "",                 # 15: 空
+                    remark              # 16: 備註
+                ]
+                
+                rows.append(row_data)
                 
                 if append_to_gsheet(rows):
                     st.success(f"✅ 成功！編號：{next_id}")
