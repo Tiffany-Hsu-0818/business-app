@@ -42,71 +42,76 @@ def get_google_sheet_client():
     st.error("❌ 找不到金鑰！")
     st.stop()
 
-def clean_headers(headers):
-    cleaned = []
-    seen = {}
-    for i, col in enumerate(headers):
-        c = str(col).strip()
-        if not c: c = f"未命名_{i}"
-        if c in seen:
-            seen[c] += 1
-            c = f"{c}_{seen[c]}"
-        else:
-            seen[c] = 0
-        cleaned.append(c)
-    return cleaned
-
-# ⭐ 新增功能：不快取，即時抓取目前最大的編號
-def get_latest_next_id():
+# ⭐ 新增：智慧寫入功能
+# 這會自動去對應 Google Sheet 的標題，不再怕欄位順序變動
+def smart_append_to_gsheet(data_dict):
     try:
         client = get_google_sheet_client()
         sh = client.open_by_key(SPREADSHEET_KEY)
         ws = sh.get_worksheet(0) # 業務表單
         
-        # 只抓第一欄 (編號欄) 的資料，速度快
-        col_values = ws.col_values(1)
+        # 1. 抓取目前所有的標題 (第一列)
+        headers = ws.row_values(1)
         
-        # 過濾出純數字的編號 (排除標題 '編號' 或空白)
-        ids = []
-        for val in col_values:
-            if str(val).isdigit():
-                ids.append(int(val))
+        # 2. 準備一個全空的列表，長度跟標題一樣
+        row_to_append = [""] * len(headers)
         
-        if ids:
-            return max(ids) + 1
-        else:
-            return 1 # 如果沒資料，從 1 開始
-            
-    except Exception:
+        # 3. 依照標題名稱，把資料填入正確的位置
+        # 這樣就算中間刪除了空白欄，或者欄位互換，都能填對！
+        for col_name, value in data_dict.items():
+            # 尋找標題在哪一欄 (模糊比對，移除前後空白)
+            try:
+                # 找出對應的 index
+                # 使用 strip() 避免標題有空白鍵導致找不到
+                idx = next(i for i, h in enumerate(headers) if str(h).strip() == col_name)
+                row_to_append[idx] = value
+            except StopIteration:
+                # 如果找不到該標題，就不填 (不會報錯)
+                pass
+                
+        # 4. 寫入資料
+        ws.append_row(row_to_append, value_input_option='USER_ENTERED')
+        return True
+    except Exception as e:
+        st.error(f"寫入失敗: {e}")
+        return False
+
+# 讀取最新編號 (維持原樣)
+def get_latest_next_id():
+    try:
+        client = get_google_sheet_client()
+        sh = client.open_by_key(SPREADSHEET_KEY)
+        ws = sh.get_worksheet(0)
+        col_values = ws.col_values(1) # 第一欄
+        ids = [int(x) for x in col_values if str(x).isdigit()]
+        return max(ids) + 1 if ids else 1
+    except:
         return 1
 
-# 讀取整張表單資料 (維持快取，避免看歷史資料時卡頓)
+# 載入資料 (維持快取)
 @st.cache_data(ttl=60)
 def load_data_from_gsheet():
     try:
         client = get_google_sheet_client()
         sh = client.open_by_key(SPREADSHEET_KEY)
         
+        # 讀取公司
         try:
             ws_c = sh.get_worksheet(1)
             if ws_c:
-                dc = ws_c.get_all_values()
-                if len(dc)>0:
-                    hc = clean_headers(dc[0])
-                    dfc = pd.DataFrame(dc[1:], columns=hc)
-                    cd = {col: [x.strip() for x in dfc[col].values if x.strip()] for col in dfc.columns if [x for x in dfc[col].values if x.strip()]}
-                else: cd = {}
+                data = ws_c.get_all_records()
+                df = pd.DataFrame(data)
+                # 轉成字典
+                cd = {col: [str(x).strip() for x in df[col].values if str(x).strip()] for col in df.columns}
             else: cd = {}
         except: cd = {}
 
+        # 讀取歷史紀錄
         try:
             ws_f = sh.get_worksheet(0)
             if ws_f:
-                df = ws_f.get_all_values()
-                if len(df)>0:
-                    hf = clean_headers(df[0])
-                    df_b = pd.DataFrame(df[1:], columns=hf)
-                else: df_b = pd.DataFrame()
+                data = ws_f.get_all_records()
+                df_b = pd.DataFrame(data)
             else: df_b = pd.DataFrame()
         except: df_b = pd.DataFrame()
              
@@ -115,19 +120,7 @@ def load_data_from_gsheet():
         st.error(f"連線失敗: {e}")
         return {}, pd.DataFrame()
 
-def append_to_gsheet(rows):
-    try:
-        client = get_google_sheet_client()
-        sh = client.open_by_key(SPREADSHEET_KEY)
-        sh.get_worksheet(0).append_rows(rows, value_input_option='USER_ENTERED')
-        return True
-    except Exception as e:
-        st.error(f"寫入失敗: {e}")
-        return False
-
-# ==========================================
-# 💱 匯率查詢
-# ==========================================
+# 匯率查詢
 def get_yahoo_rate(target_currency, query_date, inverse=False):
     ticker_symbol = f"{target_currency}TWD=X"
     check_date = query_date
@@ -156,16 +149,13 @@ def main():
         st.cache_data.clear()
         st.rerun()
         
-    # 1. 載入選單資料 (有快取)
     company_dict, df_business = load_data_from_gsheet()
-
-    # 2. ⭐ 取得最新的編號 (無快取，保證即時) ⭐
     next_id = get_latest_next_id()
 
     menu = st.sidebar.radio("選單", ["新增業務登記", "查看歷史資料"])
 
     if menu == "新增業務登記":
-        st.subheader(f"📋 建立新專案")
+        st.subheader(f"📋 建立新專案 (新編號: {next_id})")
         if 'ex_res' not in st.session_state: st.session_state['ex_res'] = ""
 
         c1, c2 = st.columns(2)
@@ -174,9 +164,8 @@ def main():
             
             cat_options = list(company_dict.keys()) + ["➕ 新增類別..."]
             selected_cat = st.selectbox("客戶類別", cat_options)
-            
             if selected_cat == "➕ 新增類別...":
-                final_cat = st.text_input("請輸入新類別名稱", placeholder="例如：醫療器材")
+                final_cat = st.text_input("請輸入新類別名稱")
                 client_options = ["➕ 新增客戶..."]
             else:
                 final_cat = selected_cat
@@ -184,7 +173,7 @@ def main():
 
             selected_client = st.selectbox("客戶名稱", client_options)
             if selected_client == "➕ 新增客戶...":
-                final_client = st.text_input("請輸入新客戶名稱", placeholder="例如：台積電")
+                final_client = st.text_input("請輸入新客戶名稱")
             else:
                 final_client = selected_client
 
@@ -194,7 +183,7 @@ def main():
 
         st.markdown("---")
         
-        # 日期開關設定
+        # ⭐⭐ 日期與開關 (預設全部 False) ⭐⭐
         d1, d2, d3 = st.columns(3)
         with d1: 
             has_delivery = st.checkbox("已有預定交期?", value=False)
@@ -219,7 +208,7 @@ def main():
 
         st.markdown("---")
         st.write("💱 **進出口匯率**")
-        final_ex = st.text_input("匯率內容 (請使用下方小工具查詢)", value=st.session_state['ex_res'])
+        final_ex = st.text_input("匯率內容", value=st.session_state['ex_res'])
         
         st.markdown("---")
         remark = st.text_area("備註")
@@ -250,36 +239,32 @@ def main():
             if not final_client or price == 0:
                 st.error("❌ 資料不完整：請確認客戶名稱與金額")
             else:
-                rows = []
-                ds = input_date.strftime("%Y-%m-%d")
-                
-                eds = ex_del.strftime("%Y-%m-%d") if has_delivery and ex_del else ""
-                ids = inv_d.strftime("%Y-%m-%d") if has_inv and inv_d else ""
-                pds = pay_d.strftime("%Y-%m-%d") if has_pay and pay_d else ""
+                # 準備資料 (處理日期字串)
+                ds_str = input_date.strftime("%Y-%m-%d")
+                eds_str = ex_del.strftime("%Y-%m-%d") if has_delivery and ex_del else ""
+                ids_str = inv_d.strftime("%Y-%m-%d") if has_inv and inv_d else ""
+                pds_str = pay_d.strftime("%Y-%m-%d") if has_pay and pay_d else ""
 
-                # 這裡只寫入一行，階段欄位留白
-                row_data = [
-                    next_id,            # 0: 編號 (這會是最新的)
-                    ds,                 # 1: 日期
-                    final_cat,          # 2: 類別
-                    final_client,       # 3: 客戶
-                    project_no,         # 4: 案號
-                    "",                 # 5: 空
-                    "",                 # 6: 階段 (強制空白)
-                    "",                 # 7: 空
-                    price,              # 8: 完稅價格
-                    eds,                # 9: 預定交期
-                    "",                 # 10: 空
-                    ids,                # 11: 發票日期
-                    "",                 # 12: 空
-                    pds,                # 13: 收款日期
-                    final_ex,           # 14: 匯率
-                    "",                 # 15: 空
-                    remark              # 16: 備註
-                ]
-                rows.append(row_data)
+                # ⭐⭐ 關鍵：建立資料字典 (Data Dictionary) ⭐⭐
+                # 這裡的 Key (左邊的字) 必須跟您 Google Sheet 的第一列標題 一模一樣！
+                # 程式會自動去對應位置，所以不會再填錯格了
                 
-                if append_to_gsheet(rows):
+                data_to_save = {
+                    "編號": next_id,
+                    "日期": ds_str,
+                    "客戶類別": final_cat,
+                    "客戶名稱": final_client,
+                    "案號": project_no,
+                    "完稅價格": price,
+                    "預定交期": eds_str,
+                    "發票日期": ids_str,
+                    "收款日期": pds_str,
+                    "進出口匯率": final_ex,
+                    "備註": remark,
+                    "階段性款項": "" # 強制留白 (不寫交貨)
+                }
+                
+                if smart_append_to_gsheet(data_to_save):
                     st.success(f"✅ 成功！編號：{next_id}")
                     if selected_client == "➕ 新增客戶...":
                         st.info(f"💡 新客戶「{final_client}」已記錄。")
