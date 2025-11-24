@@ -165,7 +165,7 @@ def main():
     menu = st.sidebar.radio("選單", ["新增業務登記", "查看歷史資料"])
 
     if menu == "新增業務登記":
-        st.subheader(f"📋 建立新專案 (新編號: {next_id})")
+        st.subheader(f"📋 建立新專案")
         if 'ex_res' not in st.session_state: st.session_state['ex_res'] = ""
 
         c1, c2 = st.columns(2)
