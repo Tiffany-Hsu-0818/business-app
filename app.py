@@ -4,32 +4,48 @@ from datetime import datetime, timedelta
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import os
-import time
+import json # 新增 json 模組
 
-# 嘗試匯入 yfinance，這是抓匯率的神器
+# 嘗試匯入 yfinance
 try:
     import yfinance as yf
 except ImportError:
-    st.error("❌ 缺少必要套件！請在黑視窗輸入： pip install yfinance")
+    st.error("❌ 缺少必要套件！請確保 requirements.txt 有包含 yfinance")
     st.stop()
 
 # ==========================================
-# 📍 設定區
+# 📍 設定區 (雲端/本地 雙棲版)
 # ==========================================
-KEY_FILE = r'C:\Users\User\Desktop\業務登記表\service_account.json'
 SPREADSHEET_KEY = '1Q1-JbHje0E-8QB0pu83OHN8jCPY8We9l2j1_7eZ8yas'
 
 # ==========================================
-# ☁️ Google Sheets 連線
+# ☁️ Google Sheets 連線 (智慧判斷)
 # ==========================================
 def get_google_sheet_client():
-    if not os.path.exists(KEY_FILE):
-        st.error(f"❌ 找不到金鑰檔案！請確認路徑：\n{KEY_FILE}")
-        st.stop()
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    creds = ServiceAccountCredentials.from_json_keyfile_name(KEY_FILE, scope)
-    client = gspread.authorize(creds)
-    return client
+    
+    # 1. 先嘗試從 Streamlit Cloud 的 Secrets 讀取
+    # 我們在 Secrets 裡設定一個 [gcp_service_account] 區塊，裡面放 json_content
+    if "gcp_service_account" in st.secrets:
+        try:
+            # 讀取 Secrets 中的 JSON 字串
+            key_dict = json.loads(st.secrets["gcp_service_account"]["json_content"])
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
+            client = gspread.authorize(creds)
+            return client
+        except Exception as e:
+            st.error(f"雲端 Secrets 讀取失敗: {e}")
+            st.stop()
+
+    # 2. 如果雲端失敗，嘗試讀取本地檔案 (您的電腦)
+    local_key_file = r'C:\Users\User\Desktop\業務登記表\service_account.json'
+    if os.path.exists(local_key_file):
+        creds = ServiceAccountCredentials.from_json_keyfile_name(local_key_file, scope)
+        client = gspread.authorize(creds)
+        return client
+    
+    st.error("❌ 找不到金鑰！(請確認已設定 Streamlit Secrets 或本地檔案路徑正確)")
+    st.stop()
 
 def clean_headers(headers):
     cleaned = []
@@ -90,58 +106,34 @@ def append_to_gsheet(rows):
         st.error(f"寫入失敗: {e}")
         return False
 
-# ==========================================
-# 💱 匯率核心 (Yahoo Finance 版)
-# ==========================================
+# ... (剩下的 get_yahoo_rate 和 main 函數都跟之前一樣，不用變) ...
+# 為了完整性，以下是完整的 get_yahoo_rate 和 main
 def get_yahoo_rate(target_currency, query_date, inverse=False):
-    """
-    使用 Yahoo Finance 查詢 TWD 匯率
-    代碼規則：例如 美金對台幣 = "USDTWD=X"
-    """
-    # 建立 Yahoo 財經代碼
     ticker_symbol = f"{target_currency}TWD=X"
-    
     rate = None
     found_date = None
     error_msg = ""
     
-    # 嘗試往前找 5 天 (因為股市假日沒開盤)
     check_date = query_date
     for _ in range(5):
         try:
-            # 下載該日期的資料
-            # Yahoo 的 end date 是不包含的，所以要 +1 天
             start_d = check_date.strftime("%Y-%m-%d")
             end_d = (check_date + timedelta(days=1)).strftime("%Y-%m-%d")
-            
-            # download 會回傳一個 DataFrame
             df = yf.download(ticker_symbol, start=start_d, end=end_d, progress=False)
             
             if not df.empty:
-                # 取得收盤價 (Close)，並轉為浮點數
-                # 新版 yfinance 格式有時會多一層，用 iloc 取值最穩
                 raw_rate = float(df['Close'].iloc[0])
-                
                 if inverse:
-                    # 反轉：1 TWD = ? 外幣
                     final_rate = 1 / raw_rate
                 else:
-                    # 正常：1 外幣 = ? TWD
                     final_rate = raw_rate
-                    
                 return final_rate, check_date, None
-                
         except Exception as e:
             error_msg = str(e)
-            
-        # 沒找到，日期減 1 天繼續試
         check_date -= timedelta(days=1)
         
-    return None, None, f"無法取得 {target_currency} 對台幣的匯率 (已追朔5天)。"
+    return None, None, f"無法取得匯率 (已追朔5天)。"
 
-# ==========================================
-# 🚀 主程式
-# ==========================================
 def main():
     st.set_page_config(page_title="雲端業務系統", layout="wide", page_icon="☁️")
     st.title("☁️ 雲端業務專案登記系統")
@@ -162,7 +154,6 @@ def main():
 
     if menu == "新增業務登記":
         st.subheader("📋 建立新專案")
-        
         if 'ex_res' not in st.session_state: st.session_state['ex_res'] = ""
 
         with st.form("cloud_form"):
@@ -187,44 +178,31 @@ def main():
                 pay_d = st.date_input("💰 收款日期", datetime.today()) if has_pay else None
 
             st.markdown("---")
-            st.write("💱 **進出口匯率 (請先在下方查詢)**")
+            st.write("💱 **進出口匯率**")
             final_ex = st.text_input("匯率內容", value=st.session_state['ex_res'])
-            
             st.markdown("---")
             remark = st.text_area("備註")
             submit = st.form_submit_button("☁️ 上傳到雲端", type="primary")
 
-        # --- 匯率小工具 ---
         with st.expander("🔍 匯率查詢小工具", expanded=True):
             c_e1, c_e2, c_e3, c_e4 = st.columns([2, 2, 2, 2])
             with c_e1: q_date = st.date_input("查詢日期", datetime.today())
             with c_e2: q_curr = st.selectbox("外幣", ["USD", "EUR", "JPY", "CNY", "GBP"])
             with c_e3: 
                 is_inverse = st.checkbox("反轉 (台幣:外幣=1:?)", value=False)
-                
             with c_e4:
                 st.write("")
                 if st.button("開始查詢"):
-                    # 初始化變數
-                    rate_val = None
-                    found_d = None
-                    err_msg = None
-                    
-                    with st.spinner("連線 Yahoo 財經資料庫..."):
+                    with st.spinner("連線中..."):
                         rate_val, found_d, err_msg = get_yahoo_rate(q_curr, q_date, is_inverse)
-                        
                         if rate_val:
                             d_str = found_d.strftime('%Y/%m/%d')
-                            
                             if is_inverse:
-                                # 1 台幣 = ? 外幣 (小數點通常比較多)
                                 desc = f"{d_str} 1 TWD = {rate_val:.5f} {q_curr}"
                             else:
-                                # 1 外幣 = ? 台幣 (一般小數點2-3位)
                                 desc = f"{d_str} 1 {q_curr} = {rate_val:.3f} TWD"
-                            
                             st.session_state['ex_res'] = desc
-                            st.success(f"查詢成功！({d_str})")
+                            st.success("查詢成功！")
                             time.sleep(0.5)
                             st.rerun()
                         else:
