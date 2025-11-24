@@ -56,6 +56,31 @@ def clean_headers(headers):
         cleaned.append(c)
     return cleaned
 
+# ⭐ 新增功能：不快取，即時抓取目前最大的編號
+def get_latest_next_id():
+    try:
+        client = get_google_sheet_client()
+        sh = client.open_by_key(SPREADSHEET_KEY)
+        ws = sh.get_worksheet(0) # 業務表單
+        
+        # 只抓第一欄 (編號欄) 的資料，速度快
+        col_values = ws.col_values(1)
+        
+        # 過濾出純數字的編號 (排除標題 '編號' 或空白)
+        ids = []
+        for val in col_values:
+            if str(val).isdigit():
+                ids.append(int(val))
+        
+        if ids:
+            return max(ids) + 1
+        else:
+            return 1 # 如果沒資料，從 1 開始
+            
+    except Exception:
+        return 1
+
+# 讀取整張表單資料 (維持快取，避免看歷史資料時卡頓)
 @st.cache_data(ttl=60)
 def load_data_from_gsheet():
     try:
@@ -131,19 +156,16 @@ def main():
         st.cache_data.clear()
         st.rerun()
         
+    # 1. 載入選單資料 (有快取)
     company_dict, df_business = load_data_from_gsheet()
 
-    next_id = 1
-    if not df_business.empty:
-        try:
-            ids = pd.to_numeric(df_business.iloc[:, 0], errors='coerce').dropna()
-            if not ids.empty: next_id = int(ids.max()) + 1
-        except: pass
+    # 2. ⭐ 取得最新的編號 (無快取，保證即時) ⭐
+    next_id = get_latest_next_id()
 
     menu = st.sidebar.radio("選單", ["新增業務登記", "查看歷史資料"])
 
     if menu == "新增業務登記":
-        st.subheader("📋 建立新專案")
+        st.subheader(f"📋 建立新專案 (新編號: {next_id})")
         if 'ex_res' not in st.session_state: st.session_state['ex_res'] = ""
 
         c1, c2 = st.columns(2)
@@ -172,24 +194,24 @@ def main():
 
         st.markdown("---")
         
-        # ⭐⭐ 日期控制區：預設全部不勾選，避免產生幽靈日期 ⭐⭐
+        # 日期開關設定
         d1, d2, d3 = st.columns(3)
         with d1: 
-            has_delivery = st.checkbox("已有預定交期?", value=False) # 預設 False
+            has_delivery = st.checkbox("已有預定交期?", value=False)
             if has_delivery:
                 ex_del = st.date_input("🚚 預定交期", datetime.today())
             else:
                 ex_del = None
 
         with d2: 
-            has_inv = st.checkbox("已有發票日期?", value=False) # 預設 False
+            has_inv = st.checkbox("已有發票日期?", value=False)
             if has_inv:
                 inv_d = st.date_input("🧾 發票日期", datetime.today())
             else:
                 inv_d = None
 
         with d3:
-            has_pay = st.checkbox("已有收款日期?", value=False) # 預設 False
+            has_pay = st.checkbox("已有收款日期?", value=False)
             if has_pay:
                 pay_d = st.date_input("💰 收款日期", datetime.today())
             else:
@@ -228,37 +250,33 @@ def main():
             if not final_client or price == 0:
                 st.error("❌ 資料不完整：請確認客戶名稱與金額")
             else:
-                # ⭐⭐ 寫入邏輯修正：只寫入一行，且不含「階段」文字 ⭐⭐
                 rows = []
                 ds = input_date.strftime("%Y-%m-%d")
                 
-                # 日期處理：嚴格檢查勾選狀態
                 eds = ex_del.strftime("%Y-%m-%d") if has_delivery and ex_del else ""
                 ids = inv_d.strftime("%Y-%m-%d") if has_inv and inv_d else ""
                 pds = pay_d.strftime("%Y-%m-%d") if has_pay and pay_d else ""
 
-                # 建立單筆資料 (對應 Google Sheet 欄位順序)
-                # 注意 index 6 (階段) 這裡直接給空字串 ""
+                # 這裡只寫入一行，階段欄位留白
                 row_data = [
-                    next_id,            # 0: 編號
+                    next_id,            # 0: 編號 (這會是最新的)
                     ds,                 # 1: 日期
                     final_cat,          # 2: 類別
                     final_client,       # 3: 客戶
                     project_no,         # 4: 案號
                     "",                 # 5: 空
-                    "",                 # 6: 階段 (⭐強制空白，不再寫入交貨/製造等字)
+                    "",                 # 6: 階段 (強制空白)
                     "",                 # 7: 空
                     price,              # 8: 完稅價格
-                    eds,                # 9: 預定交期 (沒勾就是空白)
+                    eds,                # 9: 預定交期
                     "",                 # 10: 空
-                    ids,                # 11: 發票日期 (沒勾就是空白)
+                    ids,                # 11: 發票日期
                     "",                 # 12: 空
-                    pds,                # 13: 收款日期 (沒勾就是空白)
+                    pds,                # 13: 收款日期
                     final_ex,           # 14: 匯率
                     "",                 # 15: 空
                     remark              # 16: 備註
                 ]
-                
                 rows.append(row_data)
                 
                 if append_to_gsheet(rows):
