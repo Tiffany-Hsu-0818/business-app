@@ -6,7 +6,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import os
 import json
-import plotly.express as px # 新增繪圖套件
+import plotly.express as px # 繪圖套件
 
 # 嘗試匯入 yfinance
 try:
@@ -67,7 +67,6 @@ def smart_append_to_gsheet(data_dict):
         
         for col_name, value in data_dict.items():
             try:
-                # 模糊比對標題 (移除空白)
                 idx = next(i for i, h in enumerate(headers) if str(h).strip() == col_name)
                 row_to_append[idx] = value
             except StopIteration:
@@ -106,11 +105,11 @@ def load_data_from_gsheet():
             else: cd = {}
         except: cd = {}
 
-        # 讀取歷史紀錄 (保留原始標題)
+        # 讀取歷史紀錄
         try:
             ws_f = sh.get_worksheet(0)
             if ws_f:
-                data = ws_f.get_all_values() # 讀取所有資料
+                data = ws_f.get_all_values()
                 if len(data) > 0:
                     headers = clean_headers(data[0])
                     df_b = pd.DataFrame(data[1:], columns=headers)
@@ -124,7 +123,6 @@ def load_data_from_gsheet():
         st.error(f"連線失敗: {e}")
         return {}, pd.DataFrame()
 
-# 匯率查詢
 def get_yahoo_rate(target_currency, query_date, inverse=False):
     ticker_symbol = f"{target_currency}TWD=X"
     check_date = query_date
@@ -146,37 +144,27 @@ def get_yahoo_rate(target_currency, query_date, inverse=False):
 # 🚀 主程式
 # ==========================================
 def main():
-    # 設定頁面標題與圖示
     st.set_page_config(page_title="業務管理系統", layout="wide", page_icon="💼")
     
-    # 側邊欄美化
     with st.sidebar:
-        st.image("https://cdn-icons-png.flaticon.com/512/3135/3135715.png", width=100)
         st.title("功能選單")
         menu = st.radio("請選擇", ["📝 新增業務登記", "📊 數據戰情室"], index=0)
         st.markdown("---")
         if st.button("🔄 強制重新整理"):
             st.cache_data.clear()
             st.rerun()
-        st.caption("System v2.0 | 2025")
 
-    # 載入資料
     company_dict, df_business = load_data_from_gsheet()
 
     if menu == "📝 新增業務登記":
         next_id = get_latest_next_id()
         
-        # 頂部資訊卡
         col_info1, col_info2 = st.columns(2)
-        with col_info1:
-            st.title("📝 專案登記")
-        with col_info2:
-            # 使用 Metric 顯示大字體編號
-            st.metric(label="✨ 下一個案號", value=f"No. {next_id}", delta="New")
+        with col_info1: st.title("📝 專案登記")
+        with col_info2: st.metric(label="✨ 下一個案號", value=f"No. {next_id}", delta="New")
 
         if 'ex_res' not in st.session_state: st.session_state['ex_res'] = ""
 
-        # --- 區塊 1: 客戶與基本資料 ---
         with st.container(border=True):
             st.markdown("### 🏢 客戶與基本資料")
             c1, c2 = st.columns(2)
@@ -187,7 +175,7 @@ def main():
                 selected_cat = st.selectbox("📂 客戶類別", cat_options)
                 
                 if selected_cat == "➕ 新增類別...":
-                    final_cat = st.text_input("✍️ 請輸入新類別名稱", placeholder="例如：醫療器材")
+                    final_cat = st.text_input("✍️ 請輸入新類別名稱")
                     client_options = ["➕ 新增客戶..."]
                 else:
                     final_cat = selected_cat
@@ -195,7 +183,7 @@ def main():
 
                 selected_client = st.selectbox("👤 客戶名稱", client_options)
                 if selected_client == "➕ 新增客戶...":
-                    final_client = st.text_input("✍️ 請輸入新客戶名稱", placeholder="例如：台積電")
+                    final_client = st.text_input("✍️ 請輸入新客戶名稱")
                 else:
                     final_client = selected_client
 
@@ -204,41 +192,25 @@ def main():
                 price = st.number_input("💰 完稅價格 (TWD)", min_value=0, step=1000, format="%d")
                 remark = st.text_area("📝 備註", height=100)
 
-        # --- 區塊 2: 時程與財務 ---
         with st.container(border=True):
             st.markdown("### ⏰ 時程與財務設定")
-            
             d1, d2, d3 = st.columns(3)
             with d1: 
                 has_delivery = st.toggle("啟用 預定交期", value=False)
-                if has_delivery:
-                    ex_del = st.date_input("🚚 預定交期", datetime.today())
-                else:
-                    ex_del = None
-
+                ex_del = st.date_input("🚚 預定交期", datetime.today()) if has_delivery else None
             with d2: 
                 has_inv = st.toggle("啟用 發票日期", value=False)
-                if has_inv:
-                    inv_d = st.date_input("🧾 發票日期", datetime.today())
-                else:
-                    inv_d = None
-
+                inv_d = st.date_input("🧾 發票日期", datetime.today()) if has_inv else None
             with d3:
                 has_pay = st.toggle("啟用 收款日期", value=False)
-                if has_pay:
-                    pay_d = st.date_input("💰 收款日期", datetime.today())
-                else:
-                    pay_d = None
+                pay_d = st.date_input("💰 收款日期", datetime.today()) if has_pay else None
             
             st.divider()
-            
-            # 匯率區塊
             st.markdown("#### 💱 進出口匯率")
             col_ex_input, col_ex_btn = st.columns([3, 1])
             with col_ex_input:
-                final_ex = st.text_input("匯率內容 (可手動輸入或使用下方工具)", value=st.session_state['ex_res'], label_visibility="collapsed", placeholder="匯率將顯示於此")
+                final_ex = st.text_input("匯率內容", value=st.session_state['ex_res'], label_visibility="collapsed", placeholder="匯率將顯示於此")
             
-            # 匯率小工具 (放在 Expander 裡保持整潔)
             with st.expander("🔍 點此開啟：匯率查詢小工具"):
                 e1, e2, e3, e4 = st.columns([2, 2, 2, 2])
                 with e1: q_date = st.date_input("查詢日期", datetime.today())
@@ -259,7 +231,6 @@ def main():
                                 st.rerun()
                             else: st.error(f"失敗：{err_msg}")
 
-        # --- 送出按鈕 (置底) ---
         st.write("")
         col_sub1, col_sub2, col_sub3 = st.columns([1, 2, 1])
         with col_sub2:
@@ -290,11 +261,8 @@ def main():
                 }
                 
                 if smart_append_to_gsheet(data_to_save):
-                    st.balloons() # 成功特效
+                    st.balloons()
                     st.success(f"✅ 成功建立案件：No.{next_id}")
-                    if selected_client == "➕ 新增客戶...":
-                        st.info(f"💡 新客戶「{final_client}」已記錄。")
-                    
                     st.session_state['ex_res'] = ""
                     st.cache_data.clear()
                     time.sleep(3)
@@ -306,67 +274,84 @@ def main():
         if df_business.empty:
             st.info("目前尚無資料。")
         else:
-            # --- 資料清洗與處理 ---
+            # --- 🛡️ 強力資料清洗 (修復 NaTType 錯誤) ---
             try:
-                # 1. 處理金額：移除逗號，轉為數字
                 df_clean = df_business.copy()
-                # 假設金額欄位名稱有 '價格' 或 '金額'
-                price_col = [c for c in df_clean.columns if '價格' in c or '金額' in c][0]
-                df_clean[price_col] = df_clean[price_col].astype(str).str.replace(',', '').replace('', '0')
-                df_clean[price_col] = pd.to_numeric(df_clean[price_col], errors='coerce').fillna(0)
                 
-                # 2. 處理日期：轉為 datetime 物件
-                date_col = [c for c in df_clean.columns if '日期' in c][0] # 抓第一個日期欄位
-                df_clean['converted_date'] = pd.to_datetime(df_clean[date_col], errors='coerce')
+                # 1. 尋找金額欄位並轉數字
+                price_col = next((c for c in df_clean.columns if '價格' in c or '金額' in c), None)
+                if price_col:
+                    df_clean[price_col] = df_clean[price_col].astype(str).str.replace(',', '').replace('', '0')
+                    df_clean[price_col] = pd.to_numeric(df_clean[price_col], errors='coerce').fillna(0)
                 
-                # --- 關鍵指標 (KPI) ---
-                total_rev = df_clean[price_col].sum()
-                total_count = len(df_clean)
-                
-                # 顯示 KPI 卡片
-                k1, k2, k3 = st.columns(3)
-                k1.metric("總營業額", f"${total_rev:,.0f}")
-                k2.metric("總案件數", f"{total_count} 件")
-                if total_count > 0:
-                    avg_price = total_rev / total_count
-                    k3.metric("平均客單價", f"${avg_price:,.0f}")
-                
-                st.divider()
-
-                # --- 圖表區 ---
-                c1, c2 = st.columns(2)
-                
-                with c1:
-                    st.subheader("📈 客戶類別佔比")
-                    # 檢查是否有 '客戶類別' 欄位
-                    cat_col = [c for c in df_clean.columns if '類別' in c]
-                    if cat_col:
-                        fig_pie = px.pie(df_clean, names=cat_col[0], values=price_col, hole=0.4)
-                        st.plotly_chart(fig_pie, use_container_width=True)
-                    else:
-                        st.warning("找不到「類別」欄位，無法繪圖")
-
-                with c2:
-                    st.subheader("📅 每月業績趨勢")
-                    if 'converted_date' in df_clean.columns:
-                        # 依照月份加總
-                        df_monthly = df_clean.resample('M', on='converted_date')[price_col].sum().reset_index()
-                        # 格式化日期顯示 (例如 2025-01)
-                        df_monthly['Month'] = df_monthly['converted_date'].dt.strftime('%Y-%m')
+                # 2. 尋找日期欄位並轉 datetime
+                date_col = next((c for c in df_clean.columns if '日期' in c), None)
+                if date_col:
+                    df_clean['converted_date'] = pd.to_datetime(df_clean[date_col], errors='coerce')
+                    
+                    # ⭐ 關鍵修正：移除日期無效 (NaT) 的資料列，避免畫圖報錯 ⭐
+                    df_clean = df_clean.dropna(subset=['converted_date'])
+                    
+                    # 3. 提取年份
+                    df_clean['Year'] = df_clean['converted_date'].dt.year
+                    
+                    # --- ⭐ 年份篩選器 (新增功能) ---
+                    if not df_clean.empty:
+                        all_years = sorted(df_clean['Year'].unique().astype(int), reverse=True)
+                        selected_year = st.selectbox("📅 請選擇年份", all_years)
                         
-                        fig_bar = px.bar(df_clean, x='converted_date', y=price_col, 
-                                         title="案件金額分佈", labels={price_col:'金額', 'converted_date':'日期'})
-                        st.plotly_chart(fig_bar, use_container_width=True)
-                    else:
-                        st.warning("日期格式無法解析，無法繪製趨勢圖")
+                        # 依照年份過濾資料
+                        df_final = df_clean[df_clean['Year'] == selected_year]
+                        
+                        st.markdown(f"### 📊 {selected_year} 年度總覽")
+                        
+                        # --- 關鍵指標 (KPI) ---
+                        total_rev = df_final[price_col].sum()
+                        total_count = len(df_final)
+                        
+                        k1, k2, k3 = st.columns(3)
+                        k1.metric("總營業額", f"${total_rev:,.0f}")
+                        k2.metric("總案件數", f"{total_count} 件")
+                        if total_count > 0:
+                            k3.metric("平均客單價", f"${total_rev/total_count:,.0f}")
+                        
+                        st.divider()
 
-                # --- 詳細資料表格 ---
-                with st.expander("檢視詳細資料表格"):
-                    st.dataframe(df_business, use_container_width=True)
+                        # --- 圖表區 ---
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            st.subheader("📈 客戶類別佔比")
+                            cat_col = next((c for c in df_final.columns if '類別' in c), None)
+                            if cat_col:
+                                fig_pie = px.pie(df_final, names=cat_col, values=price_col, hole=0.4)
+                                st.plotly_chart(fig_pie, use_container_width=True)
+
+                        with c2:
+                            st.subheader("📅 每月業績趨勢")
+                            # 依月份加總
+                            df_monthly = df_final.resample('M', on='converted_date')[price_col].sum().reset_index()
+                            if not df_monthly.empty:
+                                # 格式化月份顯示
+                                df_monthly['Month_Str'] = df_monthly['converted_date'].dt.strftime('%Y-%m')
+                                fig_bar = px.bar(df_monthly, x='Month_Str', y=price_col, 
+                                                 title="月營收分佈", labels={'Month_Str':'月份', price_col:'金額'})
+                                st.plotly_chart(fig_bar, use_container_width=True)
+                            else:
+                                st.info("該年份無足夠資料繪製趨勢圖")
+
+                        # --- 詳細資料表格 ---
+                        with st.expander(f"檢視 {selected_year} 年詳細資料表格"):
+                            # 顯示原始欄位就好，不需要顯示我們剛剛運算用的欄位
+                            display_cols = [c for c in df_final.columns if c not in ['converted_date', 'Year']]
+                            st.dataframe(df_final[display_cols], use_container_width=True)
+                    else:
+                        st.warning("日期欄位解析後無有效資料。")
+                else:
+                    st.error("找不到「日期」欄位，無法進行時間分析。")
 
             except Exception as e:
-                st.error(f"數據分析發生錯誤 (可能是欄位名稱不對): {e}")
-                st.dataframe(df_business) # 出錯還是顯示原始資料
+                st.error(f"數據分析發生錯誤: {e}")
+                st.dataframe(df_business)
 
 if __name__ == "__main__":
     main()
