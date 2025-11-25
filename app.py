@@ -71,27 +71,23 @@ def smart_append_to_gsheet(data_dict):
                 row_to_append[idx] = value
             except StopIteration:
                 pass
-        
+                
         ws.append_row(row_to_append, value_input_option='USER_ENTERED')
         return True
     except Exception as e:
         st.error(f"寫入失敗: {e}")
         return False
 
-# 優化版：只讀取非空值的編號
 def get_latest_next_id():
     try:
         client = get_google_sheet_client()
         sh = client.open_by_key(SPREADSHEET_KEY)
         ws = sh.get_worksheet(0)
-        # 只抓第一欄，且去除空值
         col_values = list(filter(None, ws.col_values(1)))
-        # 轉成數字並找最大值
         ids = []
         for x in col_values:
             if str(x).isdigit():
                 ids.append(int(x))
-        
         return max(ids) + 1 if ids else 1
     except:
         return 1
@@ -102,24 +98,19 @@ def load_data_from_gsheet():
         client = get_google_sheet_client()
         sh = client.open_by_key(SPREADSHEET_KEY)
         
-        # 1. 讀取公司
         try:
             ws_c = sh.get_worksheet(1)
             if ws_c:
-                # 使用 get_all_values 比較快，手動轉 DataFrame
                 data = ws_c.get_all_values()
                 if len(data) > 1:
                     headers = clean_headers(data[0])
                     df = pd.DataFrame(data[1:], columns=headers)
-                    # 移除全空的行
                     df = df.replace(r'^\s*$', pd.NA, regex=True).dropna(how='all')
                     cd = {col: [str(x).strip() for x in df[col].values if pd.notna(x) and str(x).strip()] for col in df.columns}
-                else:
-                    cd = {}
+                else: cd = {}
             else: cd = {}
         except: cd = {}
 
-        # 2. 讀取歷史紀錄 (加入瘦身優化)
         try:
             ws_f = sh.get_worksheet(0)
             if ws_f:
@@ -127,15 +118,11 @@ def load_data_from_gsheet():
                 if len(data) > 1:
                     headers = clean_headers(data[0])
                     df_b = pd.DataFrame(data[1:], columns=headers)
-                    # ⭐ 關鍵加速：立刻移除所有「編號」是空的行
-                    # 假設第一欄是編號，如果編號是空的，通常整行都是無效的
                     if '編號' in df_b.columns:
                         df_b = df_b[df_b['編號'].astype(str).str.strip() != '']
                     else:
-                        # 如果找不到編號欄，就移除全空的行
                         df_b = df_b.replace(r'^\s*$', pd.NA, regex=True).dropna(how='all')
-                else:
-                    df_b = pd.DataFrame()
+                else: df_b = pd.DataFrame()
             else: df_b = pd.DataFrame()
         except: df_b = pd.DataFrame()
              
@@ -161,26 +148,36 @@ def get_yahoo_rate(target_currency, query_date, inverse=False):
         check_date -= timedelta(days=1)
     return None, None, "無法取得匯率"
 
+# ⭐⭐⭐ 升級版：超強日期翻譯機 ⭐⭐⭐
 def parse_taiwan_date(date_str):
     if pd.isna(date_str) or str(date_str).strip() == "":
         return pd.NaT
-    s = str(date_str).strip()
+    
+    s = str(date_str).strip().replace(".", "/") # 統一將 . 換成 /
+    
     try:
-        return pd.to_datetime(s) # 試試看標準格式
-    except:
-        pass
-    try:
-        s = s.replace(".", "/")
+        # 1. 分割日期字串
         parts = s.split('/')
-        if len(parts) == 3:
-            # 處理民國年 (例如 114) 或是西元簡寫 (例如 25)
+        
+        # 情況 A: 只有 月/日 (例如 1/6) -> 自動補上今年
+        if len(parts) == 2:
+            this_year = datetime.now().year
+            return pd.to_datetime(f"{this_year}-{parts[0]}-{parts[1]}")
+            
+        # 情況 B: 有 年/月/日 (例如 114/1/6 或 2025/1/6)
+        elif len(parts) == 3:
             year_val = int(parts[0])
-            if year_val < 1911: # 假設小於 1911 的都是民國年
+            # 如果是民國年 (小於 1911)，自動 +1911 轉西元
+            if year_val < 1911:
                 year_val += 1911
             return pd.to_datetime(f"{year_val}-{parts[1]}-{parts[2]}")
+            
+        # 情況 C: 嘗試標準格式
+        else:
+            return pd.to_datetime(s)
+            
     except:
-        pass
-    return pd.NaT
+        return pd.NaT
 
 # ==========================================
 # 🚀 主程式
@@ -196,12 +193,10 @@ def main():
             st.cache_data.clear()
             st.rerun()
 
-    # 載入資料 (這步最花時間，所以上面有優化)
     with st.spinner("資料載入中..."):
         company_dict, df_business = load_data_from_gsheet()
 
     if menu == "📝 新增業務登記":
-        # 取得最新編號
         next_id = get_latest_next_id()
         
         col_info1, col_info2 = st.columns(2)
@@ -218,7 +213,6 @@ def main():
                 
                 cat_options = list(company_dict.keys()) + ["➕ 新增類別..."]
                 selected_cat = st.selectbox("📂 客戶類別", cat_options)
-                
                 if selected_cat == "➕ 新增類別...":
                     final_cat = st.text_input("✍️ 請輸入新類別名稱")
                     client_options = ["➕ 新增客戶..."]
@@ -310,7 +304,6 @@ def main():
                     st.success(f"✅ 成功建立案件：No.{next_id}")
                     if selected_client == "➕ 新增客戶...":
                         st.info(f"💡 新客戶「{final_client}」已記錄。")
-                    
                     st.session_state['ex_res'] = ""
                     st.cache_data.clear()
                     time.sleep(3)
@@ -331,20 +324,24 @@ def main():
                     df_clean[price_col] = df_clean[price_col].astype(str).str.replace(',', '').replace('', '0')
                     df_clean[price_col] = pd.to_numeric(df_clean[price_col], errors='coerce').fillna(0)
                 
-                # 2. 日期轉 datetime (加入防呆過濾)
+                # 2. 日期轉 datetime (使用升級版翻譯機)
                 date_col = next((c for c in df_clean.columns if '日期' in c), None)
                 if date_col:
+                    # 套用翻譯機
                     df_clean['converted_date'] = df_clean[date_col].apply(parse_taiwan_date)
                     
-                    # 移除日期無效的 (這步最重要，避免當機)
+                    # 移除無法辨識的資料 (這次應該會很少了)
                     df_valid = df_clean.dropna(subset=['converted_date']).copy()
                     
                     if not df_valid.empty:
+                        # 提取年份
                         df_valid['Year'] = df_valid['converted_date'].dt.year
                         
+                        # 建立年份選單
                         all_years = sorted(df_valid['Year'].unique().astype(int), reverse=True)
                         selected_year = st.selectbox("📅 請選擇年份", all_years)
                         
+                        # 依照年份過濾
                         df_final = df_valid[df_valid['Year'] == selected_year]
                         
                         st.markdown(f"### 📊 {selected_year} 年度總覽")
@@ -383,8 +380,8 @@ def main():
                             display_cols = [c for c in df_final.columns if c not in ['converted_date', 'Year']]
                             st.dataframe(df_final[display_cols], use_container_width=True)
                     else:
-                        st.warning("雖然有資料，但日期格式似乎全都無法辨識，無法進行時間分析。")
-                        with st.expander("查看原始資料"):
+                        st.warning("日期欄位解析後無有效資料。")
+                        with st.expander("查看原始資料 (除錯)"):
                             st.dataframe(df_business)
                 else:
                     st.error("找不到「日期」欄位，無法進行時間分析。")
