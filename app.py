@@ -6,7 +6,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import os
 import json
-import plotly.express as px # 繪圖套件
+import plotly.express as px
 
 # 嘗試匯入 yfinance
 try:
@@ -140,105 +140,132 @@ def get_yahoo_rate(target_currency, query_date, inverse=False):
         check_date -= timedelta(days=1)
     return None, None, "無法取得匯率"
 
+# ⭐ 新增：台灣日期翻譯機 (解決 114/01/01 看不懂的問題)
+def parse_taiwan_date(date_str):
+    if pd.isna(date_str) or date_str == "":
+        return pd.NaT
+    
+    s = str(date_str).strip()
+    
+    # 嘗試標準格式 (2025-01-01)
+    try:
+        return pd.to_datetime(s)
+    except:
+        pass
+    
+    # 嘗試民國年格式 (114/01/01, 114.01.01)
+    try:
+        # 把 . 換成 /
+        s = s.replace(".", "/")
+        parts = s.split('/')
+        
+        # 如果是 3 個部分 (年/月/日) 且年份是 2位或3位數 (例如 114)
+        if len(parts) == 3 and len(parts[0]) <= 3:
+            year = int(parts[0]) + 1911
+            return pd.to_datetime(f"{year}-{parts[1]}-{parts[2]}")
+    except:
+        pass
+        
+    return pd.NaT
+
 # ==========================================
 # 🚀 主程式
 # ==========================================
 def main():
-    st.set_page_config(page_title="業務管理系統", layout="wide", page_icon="💼")
+    st.set_page_config(page_title="雲端業務系統", layout="wide", page_icon="☁️")
+    st.title("☁️ 雲端業務專案登記系統")
     
-    with st.sidebar:
-        st.title("功能選單")
-        menu = st.radio("請選擇", ["📝 新增業務登記", "📊 數據戰情室"], index=0)
-        st.markdown("---")
-        if st.button("🔄 強制重新整理"):
-            st.cache_data.clear()
-            st.rerun()
-
-    company_dict, df_business = load_data_from_gsheet()
-
-    if menu == "📝 新增業務登記":
-        next_id = get_latest_next_id()
+    if st.button("🔄 重新整理資料"):
+        st.cache_data.clear()
+        st.rerun()
         
-        col_info1, col_info2 = st.columns(2)
-        with col_info1: st.title("📝 專案登記")
-        with col_info2: st.metric(label="✨ 下一個案號", value=f"No. {next_id}", delta="New")
+    company_dict, df_business = load_data_from_gsheet()
+    next_id = get_latest_next_id()
 
+    menu = st.sidebar.radio("選單", ["新增業務登記", "查看歷史資料"])
+
+    if menu == "新增業務登記":
+        st.subheader(f"📋 建立新專案 (新編號: {next_id})")
         if 'ex_res' not in st.session_state: st.session_state['ex_res'] = ""
 
-        with st.container(border=True):
-            st.markdown("### 🏢 客戶與基本資料")
-            c1, c2 = st.columns(2)
-            with c1:
-                input_date = st.date_input("📅 填表日期", datetime.today())
-                
-                cat_options = list(company_dict.keys()) + ["➕ 新增類別..."]
-                selected_cat = st.selectbox("📂 客戶類別", cat_options)
-                
-                if selected_cat == "➕ 新增類別...":
-                    final_cat = st.text_input("✍️ 請輸入新類別名稱")
-                    client_options = ["➕ 新增客戶..."]
-                else:
-                    final_cat = selected_cat
-                    client_options = company_dict.get(selected_cat, []) + ["➕ 新增客戶..."]
-
-                selected_client = st.selectbox("👤 客戶名稱", client_options)
-                if selected_client == "➕ 新增客戶...":
-                    final_client = st.text_input("✍️ 請輸入新客戶名稱")
-                else:
-                    final_client = selected_client
-
-            with c2:
-                project_no = st.text_input("🔖 案號 / 產品名稱")
-                price = st.number_input("💰 完稅價格 (TWD)", min_value=0, step=1000, format="%d")
-                remark = st.text_area("📝 備註", height=100)
-
-        with st.container(border=True):
-            st.markdown("### ⏰ 時程與財務設定")
-            d1, d2, d3 = st.columns(3)
-            with d1: 
-                has_delivery = st.toggle("啟用 預定交期", value=False)
-                ex_del = st.date_input("🚚 預定交期", datetime.today()) if has_delivery else None
-            with d2: 
-                has_inv = st.toggle("啟用 發票日期", value=False)
-                inv_d = st.date_input("🧾 發票日期", datetime.today()) if has_inv else None
-            with d3:
-                has_pay = st.toggle("啟用 收款日期", value=False)
-                pay_d = st.date_input("💰 收款日期", datetime.today()) if has_pay else None
+        c1, c2 = st.columns(2)
+        with c1:
+            input_date = st.date_input("填表日期", datetime.today())
             
-            st.divider()
-            st.markdown("#### 💱 進出口匯率")
-            col_ex_input, col_ex_btn = st.columns([3, 1])
-            with col_ex_input:
-                final_ex = st.text_input("匯率內容", value=st.session_state['ex_res'], label_visibility="collapsed", placeholder="匯率將顯示於此")
-            
-            with st.expander("🔍 點此開啟：匯率查詢小工具"):
-                e1, e2, e3, e4 = st.columns([2, 2, 2, 2])
-                with e1: q_date = st.date_input("查詢日期", datetime.today())
-                with e2: q_curr = st.selectbox("外幣", ["USD", "EUR", "JPY", "CNY", "GBP"])
-                with e3: is_inverse = st.checkbox("反轉 (台幣基準)", value=False)
-                with e4:
-                    st.write("")
-                    if st.button("🚀 立即查詢"):
-                        with st.spinner("連線中..."):
-                            rate_val, found_d, err_msg = get_yahoo_rate(q_curr, q_date, is_inverse)
-                            if rate_val:
-                                d_str = found_d.strftime('%Y/%m/%d')
-                                if is_inverse: desc = f"{d_str} 1 TWD = {rate_val:.5f} {q_curr}"
-                                else: desc = f"{d_str} 1 {q_curr} = {rate_val:.3f} TWD"
-                                st.session_state['ex_res'] = desc
-                                st.success("已填入！")
-                                time.sleep(0.5)
-                                st.rerun()
-                            else: st.error(f"失敗：{err_msg}")
+            cat_options = list(company_dict.keys()) + ["➕ 新增類別..."]
+            selected_cat = st.selectbox("客戶類別", cat_options)
+            if selected_cat == "➕ 新增類別...":
+                final_cat = st.text_input("請輸入新類別名稱")
+                client_options = ["➕ 新增客戶..."]
+            else:
+                final_cat = selected_cat
+                client_options = company_dict.get(selected_cat, []) + ["➕ 新增客戶..."]
 
-        st.write("")
-        col_sub1, col_sub2, col_sub3 = st.columns([1, 2, 1])
-        with col_sub2:
-            submit = st.button("💾 確認並上傳到雲端", type="primary", use_container_width=True)
+            selected_client = st.selectbox("客戶名稱", client_options)
+            if selected_client == "➕ 新增客戶...":
+                final_client = st.text_input("請輸入新客戶名稱")
+            else:
+                final_client = selected_client
+
+        with c2:
+            project_no = st.text_input("案號 / 產品名稱")
+            price = st.number_input("完稅價格", min_value=0, step=1000)
+
+        st.markdown("---")
+        d1, d2, d3 = st.columns(3)
+        with d1: 
+            has_delivery = st.checkbox("已有預定交期?", value=False)
+            if has_delivery:
+                ex_del = st.date_input("🚚 預定交期", datetime.today())
+            else:
+                ex_del = None
+
+        with d2: 
+            has_inv = st.checkbox("已有發票日期?", value=False)
+            if has_inv:
+                inv_d = st.date_input("🧾 發票日期", datetime.today())
+            else:
+                inv_d = None
+
+        with d3:
+            has_pay = st.checkbox("已有收款日期?", value=False)
+            if has_pay:
+                pay_d = st.date_input("💰 收款日期", datetime.today())
+            else:
+                pay_d = None
+
+        st.markdown("---")
+        st.write("💱 **進出口匯率**")
+        final_ex = st.text_input("匯率內容 (請使用下方小工具查詢)", value=st.session_state['ex_res'])
+        
+        st.markdown("---")
+        remark = st.text_area("備註")
+        
+        submit = st.button("☁️ 上傳到雲端", type="primary")
+
+        with st.expander("🔍 匯率查詢小工具", expanded=False):
+            c_e1, c_e2, c_e3, c_e4 = st.columns([2, 2, 2, 2])
+            with c_e1: q_date = st.date_input("查詢日期", datetime.today())
+            with c_e2: q_curr = st.selectbox("外幣", ["USD", "EUR", "JPY", "CNY", "GBP"])
+            with c_e3: is_inverse = st.checkbox("反轉 (台幣:外幣=1:?)", value=False)
+            with c_e4:
+                st.write("")
+                if st.button("開始查詢"):
+                    with st.spinner("連線中..."):
+                        rate_val, found_d, err_msg = get_yahoo_rate(q_curr, q_date, is_inverse)
+                        if rate_val:
+                            d_str = found_d.strftime('%Y/%m/%d')
+                            if is_inverse: desc = f"{d_str} 1 TWD = {rate_val:.5f} {q_curr}"
+                            else: desc = f"{d_str} 1 {q_curr} = {rate_val:.3f} TWD"
+                            st.session_state['ex_res'] = desc
+                            st.success("成功！")
+                            time.sleep(0.5)
+                            st.rerun()
+                        else: st.error(f"失敗：{err_msg}")
 
         if submit:
             if not final_client or price == 0:
-                st.toast("❌ 資料不完整：請確認客戶名稱與金額", icon="🚨")
+                st.error("❌ 資料不完整：請確認客戶名稱與金額")
             else:
                 ds_str = input_date.strftime("%Y-%m-%d")
                 eds_str = ex_del.strftime("%Y-%m-%d") if has_delivery and ex_del else ""
@@ -261,11 +288,13 @@ def main():
                 }
                 
                 if smart_append_to_gsheet(data_to_save):
-                    st.balloons()
-                    st.success(f"✅ 成功建立案件：No.{next_id}")
+                    st.success(f"✅ 成功！編號：{next_id}")
+                    if selected_client == "➕ 新增客戶...":
+                        st.info(f"💡 新客戶「{final_client}」已記錄。")
+                    
                     st.session_state['ex_res'] = ""
                     st.cache_data.clear()
-                    time.sleep(3)
+                    time.sleep(2)
                     st.rerun()
 
     elif menu == "📊 數據戰情室":
@@ -274,38 +303,35 @@ def main():
         if df_business.empty:
             st.info("目前尚無資料。")
         else:
-            # --- 🛡️ 強力資料清洗 (修復 NaTType 錯誤) ---
             try:
                 df_clean = df_business.copy()
                 
-                # 1. 尋找金額欄位並轉數字
+                # 1. 金額轉數字
                 price_col = next((c for c in df_clean.columns if '價格' in c or '金額' in c), None)
                 if price_col:
                     df_clean[price_col] = df_clean[price_col].astype(str).str.replace(',', '').replace('', '0')
                     df_clean[price_col] = pd.to_numeric(df_clean[price_col], errors='coerce').fillna(0)
                 
-                # 2. 尋找日期欄位並轉 datetime
+                # 2. 日期轉 datetime (使用自製的台灣日期翻譯機)
                 date_col = next((c for c in df_clean.columns if '日期' in c), None)
                 if date_col:
-                    df_clean['converted_date'] = pd.to_datetime(df_clean[date_col], errors='coerce')
+                    # 這裡使用 apply 來逐行翻譯日期
+                    df_clean['converted_date'] = df_clean[date_col].apply(parse_taiwan_date)
                     
-                    # ⭐ 關鍵修正：移除日期無效 (NaT) 的資料列，避免畫圖報錯 ⭐
+                    # 移除真的無法辨識的 (例如全空白或亂碼)
                     df_clean = df_clean.dropna(subset=['converted_date'])
                     
                     # 3. 提取年份
                     df_clean['Year'] = df_clean['converted_date'].dt.year
                     
-                    # --- ⭐ 年份篩選器 (新增功能) ---
                     if not df_clean.empty:
                         all_years = sorted(df_clean['Year'].unique().astype(int), reverse=True)
                         selected_year = st.selectbox("📅 請選擇年份", all_years)
                         
-                        # 依照年份過濾資料
                         df_final = df_clean[df_clean['Year'] == selected_year]
                         
                         st.markdown(f"### 📊 {selected_year} 年度總覽")
                         
-                        # --- 關鍵指標 (KPI) ---
                         total_rev = df_final[price_col].sum()
                         total_count = len(df_final)
                         
@@ -317,7 +343,6 @@ def main():
                         
                         st.divider()
 
-                        # --- 圖表區 ---
                         c1, c2 = st.columns(2)
                         with c1:
                             st.subheader("📈 客戶類別佔比")
@@ -328,10 +353,8 @@ def main():
 
                         with c2:
                             st.subheader("📅 每月業績趨勢")
-                            # 依月份加總
                             df_monthly = df_final.resample('M', on='converted_date')[price_col].sum().reset_index()
                             if not df_monthly.empty:
-                                # 格式化月份顯示
                                 df_monthly['Month_Str'] = df_monthly['converted_date'].dt.strftime('%Y-%m')
                                 fig_bar = px.bar(df_monthly, x='Month_Str', y=price_col, 
                                                  title="月營收分佈", labels={'Month_Str':'月份', price_col:'金額'})
@@ -339,13 +362,14 @@ def main():
                             else:
                                 st.info("該年份無足夠資料繪製趨勢圖")
 
-                        # --- 詳細資料表格 ---
                         with st.expander(f"檢視 {selected_year} 年詳細資料表格"):
-                            # 顯示原始欄位就好，不需要顯示我們剛剛運算用的欄位
                             display_cols = [c for c in df_final.columns if c not in ['converted_date', 'Year']]
                             st.dataframe(df_final[display_cols], use_container_width=True)
                     else:
-                        st.warning("日期欄位解析後無有效資料。")
+                        st.warning("日期欄位解析後無有效資料。請檢查 Google Sheet 的日期格式。")
+                        # 顯示原始資料幫助除錯
+                        with st.expander("查看原始資料 (除錯用)"):
+                            st.dataframe(df_business)
                 else:
                     st.error("找不到「日期」欄位，無法進行時間分析。")
 
