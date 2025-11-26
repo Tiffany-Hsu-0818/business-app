@@ -57,49 +57,32 @@ def clean_headers(headers):
         cleaned.append(c)
     return cleaned
 
-# ⭐ 新增功能：將新客戶/新類別寫回「公司名稱」分頁 ⭐
+# ⭐ 新增功能：將新客戶/新類別寫回「公司名稱」分頁
 def save_new_company_to_sheet(new_cat, new_client):
     try:
         client = get_google_sheet_client()
         sh = client.open_by_key(SPREADSHEET_KEY)
-        ws_company = sh.get_worksheet(1) # 假設公司名單在第 2 頁 (index 1)
+        ws_company = sh.get_worksheet(1) # 公司名單在第 2 頁
         
         if not ws_company:
             return False, "找不到公司名單分頁"
 
-        # 1. 讀取現有的標題 (類別)
         headers = ws_company.row_values(1)
-        # 移除空白標題
         headers = [h.strip() for h in headers if h.strip()]
         
-        # 2. 判斷是「現有類別」還是「新類別」
         if new_cat in headers:
-            # --- A. 現有類別，新增客戶 ---
-            # 找出該類別是第幾欄 (從 1 開始算)
             col_idx = headers.index(new_cat) + 1
-            
-            # 讀取該欄現有的所有客戶
             existing_clients = ws_company.col_values(col_idx)
-            
-            # 檢查是否已經存在 (避免重複)
             if new_client not in existing_clients:
-                # 寫入到該欄的最下面一個空白格
                 next_row = len(existing_clients) + 1
                 ws_company.update_cell(next_row, col_idx, new_client)
                 return True, f"已將「{new_client}」加入「{new_cat}」名單中！"
             else:
-                return True, "客戶已存在名單中，無需新增。"
-        
+                return True, "客戶已存在名單中。"
         else:
-            # --- B. 全新類別，新增欄位 ---
-            # 找出目前最後一欄是第幾欄
             new_col_idx = len(headers) + 1
-            
-            # 寫入標題 (類別名稱)
             ws_company.update_cell(1, new_col_idx, new_cat)
-            # 寫入第一筆客戶 (客戶名稱)
             ws_company.update_cell(2, new_col_idx, new_client)
-            
             return True, f"已建立新類別「{new_cat}」並加入客戶！"
 
     except Exception as e:
@@ -175,7 +158,6 @@ def load_data_from_gsheet():
         client = get_google_sheet_client()
         sh = client.open_by_key(SPREADSHEET_KEY)
         
-        # 讀取公司
         try:
             ws_c = sh.get_worksheet(1)
             if ws_c:
@@ -189,7 +171,6 @@ def load_data_from_gsheet():
             else: cd = {}
         except: cd = {}
 
-        # 讀取表單
         try:
             ws_f = sh.get_worksheet(0)
             if ws_f:
@@ -295,7 +276,9 @@ def main():
 
             with c2:
                 project_no = st.text_input("🔖 案號 / 產品名稱")
-                price = st.number_input("💰 完稅價格 (TWD)", min_value=0, step=1000, format="%d")
+                
+                # ⭐⭐ 金額修改：預設 0，但允許不填 ⭐⭐
+                price = st.number_input("💰 完稅價格 (TWD) [非必填]", min_value=0, step=1000, format="%d", value=0)
                 remark = st.text_area("📝 備註", height=100)
 
         with st.container(border=True):
@@ -343,8 +326,9 @@ def main():
             submit = st.button("💾 確認並上傳到雲端", type="primary", use_container_width=True)
 
         if submit:
-            if not final_client or price == 0:
-                st.toast("❌ 資料不完整：請確認客戶名稱與金額", icon="🚨")
+            # ⭐⭐ 驗證修改：只檢查「客戶名稱」，拿掉「金額」的限制 ⭐⭐
+            if not final_client:
+                st.toast("❌ 資料不完整：請確認客戶名稱", icon="🚨")
             else:
                 ds_str = input_date.strftime("%Y-%m-%d")
                 eds_str = ex_del.strftime("%Y-%m-%d") if has_delivery and ex_del else ""
@@ -357,7 +341,7 @@ def main():
                     "客戶類別": final_cat,
                     "客戶名稱": final_client,
                     "案號": project_no,
-                    "完稅價格": price,
+                    "完稅價格": price if price > 0 else "", # ⭐⭐ 關鍵：如果金額是 0，寫入空白 ⭐⭐
                     "預定交期": eds_str,
                     "發票日期": ids_str,
                     "收款日期": pds_str,
@@ -367,7 +351,6 @@ def main():
                 }
                 
                 if smart_append_to_gsheet(data_to_save):
-                    # ⭐⭐⭐ 自動更新選單邏輯 ⭐⭐⭐
                     update_msg = ""
                     if selected_cat == "➕ 新增類別..." or selected_client == "➕ 新增客戶...":
                         success, msg = save_new_company_to_sheet(final_cat, final_client)
