@@ -93,7 +93,6 @@ def smart_append_to_gsheet(data_dict):
         sh = client.open_by_key(SPREADSHEET_KEY)
         ws = sh.get_worksheet(0)
         
-        # 自動尋找標題列
         all_values = ws.get_all_values()
         header_row_idx = 0
         headers = []
@@ -291,7 +290,9 @@ def main():
 
     if menu == "📝 新增業務登記":
         if 'ex_res' not in st.session_state: st.session_state['ex_res'] = ""
+        # 初始化多筆日期暫存
         if 'inv_list' not in st.session_state: st.session_state['inv_list'] = []
+        if 'pay_list' not in st.session_state: st.session_state['pay_list'] = [] # 新增收款暫存
 
         with st.container(border=True):
             st.markdown("### 🏢 客戶與基本資料")
@@ -319,63 +320,68 @@ def main():
             with c2:
                 st.metric(label=f"✨ {target_year} 年度下一個編號", value=f"No. {next_id}", delta="Auto")
                 
-                with st.expander("🕵️‍♂️ 編號診斷"):
-                    st.write(f"系統正在檢查 {target_year} 年的舊資料...")
-                    if not df_business.empty and '日期' in df_business.columns:
-                        debug_df = df_business.copy()
-                        debug_df['parsed_date'] = debug_df['日期'].apply(parse_taiwan_date)
-                        year_data = debug_df[debug_df['parsed_date'].dt.year == target_year]
-                        
-                        if year_data.empty:
-                            st.info(f"📭 目前沒有找到 {target_year} 年的資料，所以編號從 1 開始。")
-                        else:
-                            max_val = pd.to_numeric(year_data['編號'], errors='coerce').max()
-                            st.success(f"✅ 找到 {len(year_data)} 筆資料，目前最大號碼是 {int(max_val)}。")
-                            st.dataframe(year_data[['編號', '日期', '客戶名稱']].head())
-                    else:
-                        st.warning("尚未讀取到任何資料。")
-
                 project_no = st.text_input("🔖 案號 / 產品名稱")
                 price = st.number_input("💰 完稅價格 (TWD)", min_value=0, step=1000, format="%d", value=0)
                 remark = st.text_area("📝 備註", height=100)
 
         with st.container(border=True):
             st.markdown("### ⏰ 時程與財務設定")
-            
-            # ⭐⭐ 改成 4 欄，加入出貨日期 ⭐⭐
+            # 分成 4 欄
             d1, d2, d3, d4 = st.columns(4)
+            
+            # 1. 預定交期
             with d1: 
                 has_delivery = st.checkbox("已有預定交期?", value=False)
                 ex_del = st.date_input("🚚 預定交期", datetime.today()) if has_delivery else None
-            
+
+            # 2. 出貨日期
             with d2:
                 has_ship = st.checkbox("已有出貨日期?", value=False)
                 ship_d = st.date_input("🚚 出貨日期", datetime.today()) if has_ship else None
 
+            # 3. 發票日期 (多筆)
             with d3: 
                 has_inv = st.checkbox("已有發票日期?", value=False)
                 if has_inv:
                     c_pick, c_add = st.columns([3, 1])
                     with c_pick:
-                        new_inv_date = st.date_input("選擇日期", datetime.today(), label_visibility="collapsed")
+                        new_inv_date = st.date_input("發票日期", datetime.today(), label_visibility="collapsed", key="pick_inv")
                     with c_add:
-                        if st.button("➕"):
+                        if st.button("➕", key="add_inv"):
                             if new_inv_date not in st.session_state['inv_list']:
                                 st.session_state['inv_list'].append(new_inv_date)
                                 st.session_state['inv_list'].sort()
+                    
                     if st.session_state['inv_list']:
                         date_strs = [d.strftime('%Y-%m-%d') for d in st.session_state['inv_list']]
                         st.caption(f"已加入: {', '.join(date_strs)}")
-                        if st.button("🗑️ 清除"):
+                        if st.button("🗑️", key="clr_inv", help="清空發票日期"):
                             st.session_state['inv_list'] = []
                             st.rerun()
                 else:
-                    if st.session_state['inv_list']:
-                        st.session_state['inv_list'] = []
+                    if st.session_state['inv_list']: st.session_state['inv_list'] = []
 
+            # 4. 收款日期 (多筆 - 新增功能)
             with d4:
                 has_pay = st.checkbox("已有收款日期?", value=False)
-                pay_d = st.date_input("💰 收款日期", datetime.today()) if has_pay else None
+                if has_pay:
+                    c_pick_p, c_add_p = st.columns([3, 1])
+                    with c_pick_p:
+                        new_pay_date = st.date_input("收款日期", datetime.today(), label_visibility="collapsed", key="pick_pay")
+                    with c_add_p:
+                        if st.button("➕", key="add_pay"):
+                            if new_pay_date not in st.session_state['pay_list']:
+                                st.session_state['pay_list'].append(new_pay_date)
+                                st.session_state['pay_list'].sort()
+                    
+                    if st.session_state['pay_list']:
+                        date_strs_p = [d.strftime('%Y-%m-%d') for d in st.session_state['pay_list']]
+                        st.caption(f"已加入: {', '.join(date_strs_p)}")
+                        if st.button("🗑️", key="clr_pay", help="清空收款日期"):
+                            st.session_state['pay_list'] = []
+                            st.rerun()
+                else:
+                    if st.session_state['pay_list']: st.session_state['pay_list'] = []
             
             st.divider()
             st.markdown("#### 💱 進出口匯率")
@@ -415,8 +421,11 @@ def main():
                 ds_str = input_date.strftime("%Y-%m-%d")
                 eds_str = ex_del.strftime("%Y-%m-%d") if has_delivery and ex_del else ""
                 ship_str = ship_d.strftime("%Y-%m-%d") if has_ship and ship_d else ""
-                pds_str = pay_d.strftime("%Y-%m-%d") if has_pay and pay_d else ""
+                
+                # 組合多筆發票日期
                 ids_str = ", ".join([d.strftime('%Y-%m-%d') for d in st.session_state['inv_list']]) if has_inv and st.session_state['inv_list'] else ""
+                # 組合多筆收款日期
+                pds_str = ", ".join([d.strftime('%Y-%m-%d') for d in st.session_state['pay_list']]) if has_pay and st.session_state['pay_list'] else ""
 
                 data_to_save = {
                     "編號": next_id,
@@ -426,9 +435,9 @@ def main():
                     "案號": project_no,
                     "完稅價格": price if price > 0 else "",
                     "預定交期": eds_str,
-                    "出貨日期": ship_str, # 新增欄位
+                    "出貨日期": ship_str, 
                     "發票日期": ids_str,
-                    "收款日期": pds_str,
+                    "收款日期": pds_str, # 這裡存多筆
                     "進出口匯率": final_ex,
                     "備註": remark,
                     "階段性款項": "" 
@@ -444,6 +453,7 @@ def main():
                     st.success(f"✅ 成功建立案件：No.{next_id}{update_msg}")
                     st.session_state['ex_res'] = ""
                     st.session_state['inv_list'] = []
+                    st.session_state['pay_list'] = [] # 清空
                     st.cache_data.clear()
                     time.sleep(3)
                     st.rerun()
@@ -464,8 +474,8 @@ def main():
                 
                 date_col = next((c for c in df_clean.columns if '日期' in c), None)
                 if date_col:
-                    # ⭐⭐ 加入 '出貨日期' 到轉換清單 ⭐⭐
-                    potential_date_cols = ['日期', '預定交期', '收款日期', '出貨日期'] 
+                    # ⭐⭐ 關鍵修正：移除 '收款日期'，不轉 datetime ⭐⭐
+                    potential_date_cols = ['日期', '預定交期', '出貨日期'] 
                     for col in potential_date_cols:
                         if col in df_clean.columns:
                             df_clean[col] = df_clean[col].apply(parse_taiwan_date)
@@ -519,8 +529,9 @@ def main():
                                 "完稅價格": st.column_config.NumberColumn("完稅價格", format="$%d"),
                                 "日期": st.column_config.DateColumn("日期", format="YYYY-MM-DD"),
                                 "預定交期": st.column_config.DateColumn("預定交期", format="YYYY-MM-DD"),
-                                "出貨日期": st.column_config.DateColumn("出貨日期", format="YYYY-MM-DD"), # 新增
-                                "收款日期": st.column_config.DateColumn("收款日期", format="YYYY-MM-DD"),
+                                "出貨日期": st.column_config.DateColumn("出貨日期", format="YYYY-MM-DD"),
+                                # ⭐ 收款日期改回文字欄位，因為可能多筆
+                                "收款日期": st.column_config.TextColumn("收款日期 (可多筆)"),
                                 "發票日期": st.column_config.TextColumn("發票日期 (可多筆)"),
                             }
                         )
