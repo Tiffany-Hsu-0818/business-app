@@ -57,6 +57,54 @@ def clean_headers(headers):
         cleaned.append(c)
     return cleaned
 
+# ⭐ 新增功能：將新客戶/新類別寫回「公司名稱」分頁 ⭐
+def save_new_company_to_sheet(new_cat, new_client):
+    try:
+        client = get_google_sheet_client()
+        sh = client.open_by_key(SPREADSHEET_KEY)
+        ws_company = sh.get_worksheet(1) # 假設公司名單在第 2 頁 (index 1)
+        
+        if not ws_company:
+            return False, "找不到公司名單分頁"
+
+        # 1. 讀取現有的標題 (類別)
+        headers = ws_company.row_values(1)
+        # 移除空白標題
+        headers = [h.strip() for h in headers if h.strip()]
+        
+        # 2. 判斷是「現有類別」還是「新類別」
+        if new_cat in headers:
+            # --- A. 現有類別，新增客戶 ---
+            # 找出該類別是第幾欄 (從 1 開始算)
+            col_idx = headers.index(new_cat) + 1
+            
+            # 讀取該欄現有的所有客戶
+            existing_clients = ws_company.col_values(col_idx)
+            
+            # 檢查是否已經存在 (避免重複)
+            if new_client not in existing_clients:
+                # 寫入到該欄的最下面一個空白格
+                next_row = len(existing_clients) + 1
+                ws_company.update_cell(next_row, col_idx, new_client)
+                return True, f"已將「{new_client}」加入「{new_cat}」名單中！"
+            else:
+                return True, "客戶已存在名單中，無需新增。"
+        
+        else:
+            # --- B. 全新類別，新增欄位 ---
+            # 找出目前最後一欄是第幾欄
+            new_col_idx = len(headers) + 1
+            
+            # 寫入標題 (類別名稱)
+            ws_company.update_cell(1, new_col_idx, new_cat)
+            # 寫入第一筆客戶 (客戶名稱)
+            ws_company.update_cell(2, new_col_idx, new_client)
+            
+            return True, f"已建立新類別「{new_cat}」並加入客戶！"
+
+    except Exception as e:
+        return False, f"更新名單失敗: {e}"
+
 def smart_append_to_gsheet(data_dict):
     try:
         client = get_google_sheet_client()
@@ -127,6 +175,7 @@ def load_data_from_gsheet():
         client = get_google_sheet_client()
         sh = client.open_by_key(SPREADSHEET_KEY)
         
+        # 讀取公司
         try:
             ws_c = sh.get_worksheet(1)
             if ws_c:
@@ -140,6 +189,7 @@ def load_data_from_gsheet():
             else: cd = {}
         except: cd = {}
 
+        # 讀取表單
         try:
             ws_f = sh.get_worksheet(0)
             if ws_f:
@@ -317,10 +367,17 @@ def main():
                 }
                 
                 if smart_append_to_gsheet(data_to_save):
+                    # ⭐⭐⭐ 自動更新選單邏輯 ⭐⭐⭐
+                    update_msg = ""
+                    if selected_cat == "➕ 新增類別..." or selected_client == "➕ 新增客戶...":
+                        success, msg = save_new_company_to_sheet(final_cat, final_client)
+                        if success:
+                            update_msg = f" | {msg}"
+                        else:
+                            st.error(msg)
+
                     st.balloons()
-                    st.success(f"✅ 成功建立案件：No.{next_id}")
-                    if selected_client == "➕ 新增客戶...":
-                        st.info(f"💡 新客戶「{final_client}」已記錄。")
+                    st.success(f"✅ 成功建立案件：No.{next_id}{update_msg}")
                     st.session_state['ex_res'] = ""
                     st.cache_data.clear()
                     time.sleep(3)
@@ -342,27 +399,20 @@ def main():
                 
                 date_col = next((c for c in df_clean.columns if '日期' in c), None)
                 if date_col:
-                    # --- ⭐ 關鍵修正區：在編輯前先強制轉換所有日期欄位 ⭐ ---
-                    # 1. 找出所有可能是日期的欄位
                     potential_date_cols = ['日期', '預定交期', '發票日期', '收款日期']
-                    # 2. 逐一進行翻譯
                     for col in potential_date_cols:
                         if col in df_clean.columns:
                             df_clean[col] = df_clean[col].apply(parse_taiwan_date)
                     
-                    # 主要日期欄位如果是 NaT 就丟掉 (僅限於主日期欄位)
                     df_valid = df_clean.dropna(subset=[date_col]).copy()
                     
                     if not df_valid.empty:
                         df_valid['Year'] = df_valid[date_col].dt.year
-                        
                         all_years = sorted(df_valid['Year'].unique().astype(int), reverse=True)
                         selected_year = st.selectbox("📅 請選擇年份", all_years)
-                        
                         df_final = df_valid[df_valid['Year'] == selected_year]
                         
                         st.markdown(f"### 📊 {selected_year} 年度總覽")
-                        
                         total_rev = df_final[price_col].sum()
                         total_count = len(df_final)
                         k1, k2, k3 = st.columns(3)
@@ -391,10 +441,8 @@ def main():
                         st.subheader(f"📝 編輯 {selected_year} 年度資料")
                         st.info("💡 提示：直接點擊欄位即可修改，修改完請按下方「儲存變更」按鈕。")
                         
-                        # 整理要顯示的欄位 (排除計算用的)
                         display_cols = [c for c in df_final.columns if c not in ['Year', 'converted_date']]
                         
-                        # 建立編輯器，這次日期已經是真正的 datetime 了！
                         edited_df = st.data_editor(
                             df_final[display_cols],
                             key="data_editor",
