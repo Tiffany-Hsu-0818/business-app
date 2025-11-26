@@ -57,12 +57,11 @@ def clean_headers(headers):
         cleaned.append(c)
     return cleaned
 
-# ⭐ 新增功能：將新客戶/新類別寫回「公司名稱」分頁
 def save_new_company_to_sheet(new_cat, new_client):
     try:
         client = get_google_sheet_client()
         sh = client.open_by_key(SPREADSHEET_KEY)
-        ws_company = sh.get_worksheet(1) # 公司名單在第 2 頁
+        ws_company = sh.get_worksheet(1) 
         
         if not ws_company:
             return False, "找不到公司名單分頁"
@@ -211,7 +210,11 @@ def get_yahoo_rate(target_currency, query_date, inverse=False):
 def parse_taiwan_date(date_str):
     if pd.isna(date_str) or str(date_str).strip() == "":
         return pd.NaT
-    s = str(date_str).strip().replace(".", "/")
+    
+    # 處理多筆日期的情況：只抓第一個日期來做分析
+    # 例如 "2025-01-01, 2025-02-01" -> 只抓 "2025-01-01"
+    s = str(date_str).split(',')[0].strip().replace(".", "/")
+    
     try:
         parts = s.split('/')
         if len(parts) == 2:
@@ -252,6 +255,9 @@ def main():
         with col_info2: st.metric(label="✨ 下一個案號", value=f"No. {next_id}", delta="New")
 
         if 'ex_res' not in st.session_state: st.session_state['ex_res'] = ""
+        
+        # 初始化發票暫存清單
+        if 'invoice_dates_list' not in st.session_state: st.session_state['invoice_dates_list'] = []
 
         with st.container(border=True):
             st.markdown("### 🏢 客戶與基本資料")
@@ -276,20 +282,43 @@ def main():
 
             with c2:
                 project_no = st.text_input("🔖 案號 / 產品名稱")
-                
-                # ⭐⭐ 金額修改：預設 0，但允許不填 ⭐⭐
-                price = st.number_input("💰 完稅價格 (TWD) [非必填]", min_value=0, step=1000, format="%d", value=0)
+                price = st.number_input("💰 完稅價格 (TWD)", min_value=0, step=1000, format="%d", value=0)
                 remark = st.text_area("📝 備註", height=100)
 
         with st.container(border=True):
             st.markdown("### ⏰ 時程與財務設定")
             d1, d2, d3 = st.columns(3)
+            
+            # 1. 預定交期
             with d1: 
                 has_delivery = st.checkbox("已有預定交期?", value=False)
                 ex_del = st.date_input("🚚 預定交期", datetime.today()) if has_delivery else None
+
+            # 2. 發票日期 (多筆模式)
             with d2: 
-                has_inv = st.checkbox("已有發票日期?", value=False)
-                inv_d = st.date_input("🧾 發票日期", datetime.today()) if has_inv else None
+                st.markdown("**🧾 發票日期 (可多筆)**")
+                col_inv_pick, col_inv_add = st.columns([3, 1])
+                with col_inv_pick:
+                    temp_inv_date = st.date_input("選擇日期", datetime.today(), label_visibility="collapsed")
+                with col_inv_add:
+                    if st.button("➕ 加入"):
+                        if temp_inv_date not in st.session_state['invoice_dates_list']:
+                            st.session_state['invoice_dates_list'].append(temp_inv_date)
+                            # 排序日期讓顯示更整齊
+                            st.session_state['invoice_dates_list'].sort()
+                
+                # 顯示目前已選的日期
+                if st.session_state['invoice_dates_list']:
+                    # 用 Chips 樣式顯示
+                    inv_display = [d.strftime('%Y-%m-%d') for d in st.session_state['invoice_dates_list']]
+                    st.caption(f"已選: {', '.join(inv_display)}")
+                    if st.button("🗑️ 清空發票日期"):
+                        st.session_state['invoice_dates_list'] = []
+                        st.rerun()
+                else:
+                    st.caption("尚未加入日期")
+
+            # 3. 收款日期
             with d3:
                 has_pay = st.checkbox("已有收款日期?", value=False)
                 pay_d = st.date_input("💰 收款日期", datetime.today()) if has_pay else None
@@ -326,14 +355,18 @@ def main():
             submit = st.button("💾 確認並上傳到雲端", type="primary", use_container_width=True)
 
         if submit:
-            # ⭐⭐ 驗證修改：只檢查「客戶名稱」，拿掉「金額」的限制 ⭐⭐
             if not final_client:
                 st.toast("❌ 資料不完整：請確認客戶名稱", icon="🚨")
             else:
                 ds_str = input_date.strftime("%Y-%m-%d")
                 eds_str = ex_del.strftime("%Y-%m-%d") if has_delivery and ex_del else ""
-                ids_str = inv_d.strftime("%Y-%m-%d") if has_inv and inv_d else ""
                 pds_str = pay_d.strftime("%Y-%m-%d") if has_pay and pay_d else ""
+                
+                # ⭐ 處理多筆發票日期：轉成字串並用逗號分隔 ⭐
+                if st.session_state['invoice_dates_list']:
+                    ids_str = ", ".join([d.strftime("%Y-%m-%d") for d in st.session_state['invoice_dates_list']])
+                else:
+                    ids_str = ""
 
                 data_to_save = {
                     "編號": next_id,
@@ -341,9 +374,9 @@ def main():
                     "客戶類別": final_cat,
                     "客戶名稱": final_client,
                     "案號": project_no,
-                    "完稅價格": price if price > 0 else "", # ⭐⭐ 關鍵：如果金額是 0，寫入空白 ⭐⭐
+                    "完稅價格": price if price > 0 else "", 
                     "預定交期": eds_str,
-                    "發票日期": ids_str,
+                    "發票日期": ids_str, # 這裡會存入 "2025-01-01, 2025-02-01"
                     "收款日期": pds_str,
                     "進出口匯率": final_ex,
                     "備註": remark,
@@ -354,14 +387,12 @@ def main():
                     update_msg = ""
                     if selected_cat == "➕ 新增類別..." or selected_client == "➕ 新增客戶...":
                         success, msg = save_new_company_to_sheet(final_cat, final_client)
-                        if success:
-                            update_msg = f" | {msg}"
-                        else:
-                            st.error(msg)
+                        if success: update_msg = f" | {msg}"
 
                     st.balloons()
                     st.success(f"✅ 成功建立案件：No.{next_id}{update_msg}")
                     st.session_state['ex_res'] = ""
+                    st.session_state['invoice_dates_list'] = [] # 清空發票列表
                     st.cache_data.clear()
                     time.sleep(3)
                     st.rerun()
@@ -382,9 +413,11 @@ def main():
                 
                 date_col = next((c for c in df_clean.columns if '日期' in c), None)
                 if date_col:
+                    # 轉換日期欄位
                     potential_date_cols = ['日期', '預定交期', '發票日期', '收款日期']
                     for col in potential_date_cols:
                         if col in df_clean.columns:
+                            # apply parse_taiwan_date 會自動只抓逗號前的第一個日期
                             df_clean[col] = df_clean[col].apply(parse_taiwan_date)
                     
                     df_valid = df_clean.dropna(subset=[date_col]).copy()
@@ -426,6 +459,8 @@ def main():
                         
                         display_cols = [c for c in df_final.columns if c not in ['Year', 'converted_date']]
                         
+                        # ⚠️ 注意：因為發票日期可能有多筆，所以編輯表格時，發票欄位不使用 DateColumn
+                        # 而是使用 TextColumn 讓您可以輸入 "2025-01-01, 2025-02-01"
                         edited_df = st.data_editor(
                             df_final[display_cols],
                             key="data_editor",
@@ -436,8 +471,9 @@ def main():
                                 "完稅價格": st.column_config.NumberColumn("完稅價格", format="$%d"),
                                 "日期": st.column_config.DateColumn("日期", format="YYYY-MM-DD"),
                                 "預定交期": st.column_config.DateColumn("預定交期", format="YYYY-MM-DD"),
-                                "發票日期": st.column_config.DateColumn("發票日期", format="YYYY-MM-DD"),
                                 "收款日期": st.column_config.DateColumn("收款日期", format="YYYY-MM-DD"),
+                                # 發票日期 移除 DateColumn 設定，預設為文字，這樣才能存多筆
+                                "發票日期": st.column_config.TextColumn("發票日期 (可多筆，用逗號分隔)"),
                             }
                         )
                         
