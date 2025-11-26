@@ -137,18 +137,76 @@ def update_records_in_gsheet(edited_df):
         st.error(f"更新失敗: {e}")
         return False
 
-def get_latest_next_id():
+# 日期翻譯機
+def parse_taiwan_date(date_str):
+    if pd.isna(date_str) or str(date_str).strip() == "":
+        return pd.NaT
+    s = str(date_str).split(',')[0].strip().replace(".", "/")
+    try:
+        parts = s.split('/')
+        if len(parts) == 2:
+            this_year = datetime.now().year
+            return pd.to_datetime(f"{this_year}-{parts[0]}-{parts[1]}")
+        elif len(parts) == 3:
+            year_val = int(parts[0])
+            if year_val < 1911:
+                year_val += 1911
+            return pd.to_datetime(f"{year_val}-{parts[1]}-{parts[2]}")
+        else:
+            return pd.to_datetime(s)
+    except:
+        return pd.NaT
+
+# ⭐⭐⭐ 重大更新：依照「年份」取得最新編號 ⭐⭐⭐
+def get_next_id_by_year(target_year):
+    """
+    功能：找出指定年份 (target_year) 目前最大的編號，然後 +1
+    """
     try:
         client = get_google_sheet_client()
         sh = client.open_by_key(SPREADSHEET_KEY)
         ws = sh.get_worksheet(0)
-        col_values = list(filter(None, ws.col_values(1)))
-        ids = []
-        for x in col_values:
-            if str(x).isdigit():
-                ids.append(int(x))
-        return max(ids) + 1 if ids else 1
-    except:
+        
+        # 讀取所有資料 (包含編號與日期)
+        # 為了效能，我們只抓前兩欄 (假設A欄是編號, B欄是日期)
+        # 注意：如果不確定欄位位置，這裡使用 get_all_values() 讀整張表比較保險
+        data = ws.get_all_values()
+        
+        if len(data) <= 1: return 1 # 只有標題或全空
+        
+        # 找出「編號」和「日期」在哪一欄
+        headers = clean_headers(data[0])
+        try:
+            id_idx = headers.index("編號")
+            date_idx = headers.index("日期")
+        except ValueError:
+            return 1 # 找不到欄位，從 1 開始
+            
+        max_id = 0
+        
+        # 掃描每一行，檢查年份
+        for row in data[1:]:
+            # 確保 row 長度足夠
+            if len(row) <= max(id_idx, date_idx): continue
+            
+            date_val = row[date_idx]
+            id_val = row[id_idx]
+            
+            # 解析日期
+            dt = parse_taiwan_date(date_val)
+            if dt is pd.NaT: continue # 日期無效跳過
+            
+            # 如果年份符合目標年份
+            if dt.year == target_year:
+                if str(id_val).isdigit():
+                    current_id = int(id_val)
+                    if current_id > max_id:
+                        max_id = current_id
+                        
+        return max_id + 1
+        
+    except Exception as e:
+        print(f"編號計算錯誤: {e}")
         return 1
 
 @st.cache_data(ttl=60)
@@ -207,28 +265,6 @@ def get_yahoo_rate(target_currency, query_date, inverse=False):
         check_date -= timedelta(days=1)
     return None, None, "無法取得匯率"
 
-def parse_taiwan_date(date_str):
-    if pd.isna(date_str) or str(date_str).strip() == "":
-        return pd.NaT
-    
-    # 只取第一個日期來轉換 (避免多筆日期報錯)
-    s = str(date_str).split(',')[0].strip().replace(".", "/")
-    
-    try:
-        parts = s.split('/')
-        if len(parts) == 2:
-            this_year = datetime.now().year
-            return pd.to_datetime(f"{this_year}-{parts[0]}-{parts[1]}")
-        elif len(parts) == 3:
-            year_val = int(parts[0])
-            if year_val < 1911:
-                year_val += 1911
-            return pd.to_datetime(f"{year_val}-{parts[1]}-{parts[2]}")
-        else:
-            return pd.to_datetime(s)
-    except:
-        return pd.NaT
-
 # ==========================================
 # 🚀 主程式
 # ==========================================
@@ -247,12 +283,7 @@ def main():
         company_dict, df_business = load_data_from_gsheet()
 
     if menu == "📝 新增業務登記":
-        next_id = get_latest_next_id()
         
-        col_info1, col_info2 = st.columns(2)
-        with col_info1: st.title("📝 專案登記")
-        with col_info2: st.metric(label="✨ 下一個案號", value=f"No. {next_id}", delta="New")
-
         if 'ex_res' not in st.session_state: st.session_state['ex_res'] = ""
         if 'inv_list' not in st.session_state: st.session_state['inv_list'] = []
 
@@ -260,7 +291,12 @@ def main():
             st.markdown("### 🏢 客戶與基本資料")
             c1, c2 = st.columns(2)
             with c1:
+                # 1. 使用者選日期
                 input_date = st.date_input("📅 填表日期", datetime.today())
+                
+                # 2. ⭐ 根據選的日期，立刻計算當年度的最新編號 ⭐
+                target_year = input_date.year
+                next_id = get_next_id_by_year(target_year)
                 
                 cat_options = list(company_dict.keys()) + ["➕ 新增類別..."]
                 selected_cat = st.selectbox("📂 客戶類別", cat_options)
@@ -278,6 +314,9 @@ def main():
                     final_client = selected_client
 
             with c2:
+                # 顯示即時編號
+                st.metric(label=f"✨ {target_year} 年度下一個案號", value=f"No. {next_id}", delta="New")
+                
                 project_no = st.text_input("🔖 案號 / 產品名稱")
                 price = st.number_input("💰 完稅價格 (TWD)", min_value=0, step=1000, format="%d", value=0)
                 remark = st.text_area("📝 備註", height=100)
@@ -285,6 +324,7 @@ def main():
         with st.container(border=True):
             st.markdown("### ⏰ 時程與財務設定")
             d1, d2, d3 = st.columns(3)
+            
             with d1: 
                 has_delivery = st.checkbox("已有預定交期?", value=False)
                 ex_del = st.date_input("🚚 預定交期", datetime.today()) if has_delivery else None
@@ -360,7 +400,7 @@ def main():
                     ids_str = ""
 
                 data_to_save = {
-                    "編號": next_id,
+                    "編號": next_id, # 這是根據年份計算出來的正確編號
                     "日期": ds_str,
                     "客戶類別": final_cat,
                     "客戶名稱": final_client,
@@ -404,9 +444,7 @@ def main():
                 
                 date_col = next((c for c in df_clean.columns if '日期' in c), None)
                 if date_col:
-                    # ⭐⭐ 修正重點：這裡我們移除 '發票日期' ⭐⭐
-                    # 只轉換其他單一日期欄位，保留發票日期為原始文字字串
-                    potential_date_cols = ['日期', '預定交期', '收款日期'] 
+                    potential_date_cols = ['日期', '預定交期', '收款日期'] # 發票日期不轉
                     for col in potential_date_cols:
                         if col in df_clean.columns:
                             df_clean[col] = df_clean[col].apply(parse_taiwan_date)
@@ -420,7 +458,6 @@ def main():
                         df_final = df_valid[df_valid['Year'] == selected_year]
                         
                         st.markdown(f"### 📊 {selected_year} 年度總覽")
-                        
                         total_rev = df_final[price_col].sum()
                         total_count = len(df_final)
                         k1, k2, k3 = st.columns(3)
@@ -462,7 +499,6 @@ def main():
                                 "日期": st.column_config.DateColumn("日期", format="YYYY-MM-DD"),
                                 "預定交期": st.column_config.DateColumn("預定交期", format="YYYY-MM-DD"),
                                 "收款日期": st.column_config.DateColumn("收款日期", format="YYYY-MM-DD"),
-                                # ⭐ 發票日期設為 TextColumn，允許輸入多筆文字
                                 "發票日期": st.column_config.TextColumn("發票日期 (可多筆)"),
                             }
                         )
