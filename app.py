@@ -137,45 +137,6 @@ def update_records_in_gsheet(edited_df):
         st.error(f"更新失敗: {e}")
         return False
 
-@st.cache_data(ttl=60)
-def load_data_from_gsheet():
-    try:
-        client = get_google_sheet_client()
-        sh = client.open_by_key(SPREADSHEET_KEY)
-        
-        try:
-            ws_c = sh.get_worksheet(1)
-            if ws_c:
-                data = ws_c.get_all_values()
-                if len(data) > 1:
-                    headers = clean_headers(data[0])
-                    df = pd.DataFrame(data[1:], columns=headers)
-                    df = df.replace(r'^\s*$', pd.NA, regex=True).dropna(how='all')
-                    cd = {col: [str(x).strip() for x in df[col].values if pd.notna(x) and str(x).strip()] for col in df.columns}
-                else: cd = {}
-            else: cd = {}
-        except: cd = {}
-
-        try:
-            ws_f = sh.get_worksheet(0)
-            if ws_f:
-                data = ws_f.get_all_values()
-                if len(data) > 1:
-                    headers = clean_headers(data[0])
-                    df_b = pd.DataFrame(data[1:], columns=headers)
-                    if '編號' in df_b.columns:
-                        df_b = df_b[df_b['編號'].astype(str).str.strip() != '']
-                    else:
-                        df_b = df_b.replace(r'^\s*$', pd.NA, regex=True).dropna(how='all')
-                else: df_b = pd.DataFrame()
-            else: df_b = pd.DataFrame()
-        except: df_b = pd.DataFrame()
-             
-        return cd, df_b
-    except Exception as e:
-        st.error(f"連線失敗: {e}")
-        return {}, pd.DataFrame()
-
 def get_yahoo_rate(target_currency, query_date, inverse=False):
     ticker_symbol = f"{target_currency}TWD=X"
     check_date = query_date
@@ -193,58 +154,114 @@ def get_yahoo_rate(target_currency, query_date, inverse=False):
         check_date -= timedelta(days=1)
     return None, None, "無法取得匯率"
 
+# ⭐⭐⭐ 終極版日期翻譯機 ⭐⭐⭐
 def parse_taiwan_date(date_str):
     if pd.isna(date_str) or str(date_str).strip() == "":
         return pd.NaT
-    s = str(date_str).split(',')[0].strip().replace(".", "/")
+    
+    # 1. 處理逗號分隔 (只取第一個)
+    s = str(date_str).split(',')[0].strip()
+    # 2. 統一分隔符
+    s = s.replace(".", "/")
+    
     try:
         parts = s.split('/')
+        
+        # 情況 A: 只有 月/日 (例如 1/6)
         if len(parts) == 2:
             this_year = datetime.now().year
             return pd.to_datetime(f"{this_year}-{parts[0]}-{parts[1]}")
+            
+        # 情況 B: 有 年/月/日 (例如 114/1/6 或 2025/1/6)
         elif len(parts) == 3:
             year_val = int(parts[0])
+            # 如果是民國年 (小於 1911)，自動 +1911 轉西元
             if year_val < 1911:
                 year_val += 1911
             return pd.to_datetime(f"{year_val}-{parts[1]}-{parts[2]}")
+            
+        # 情況 C: 嘗試標準格式
         else:
             return pd.to_datetime(s)
+            
     except:
         return pd.NaT
 
-# ⭐⭐⭐ 新增：智慧年份編號計算機 ⭐⭐⭐
+@st.cache_data(ttl=60)
+def load_data_from_gsheet():
+    try:
+        client = get_google_sheet_client()
+        sh = client.open_by_key(SPREADSHEET_KEY)
+        
+        # 讀取公司
+        try:
+            ws_c = sh.get_worksheet(1)
+            if ws_c:
+                data = ws_c.get_all_values()
+                if len(data) > 1:
+                    headers = clean_headers(data[0])
+                    df = pd.DataFrame(data[1:], columns=headers)
+                    df = df.replace(r'^\s*$', pd.NA, regex=True).dropna(how='all')
+                    cd = {col: [str(x).strip() for x in df[col].values if pd.notna(x) and str(x).strip()] for col in df.columns}
+                else: cd = {}
+            else: cd = {}
+        except: cd = {}
+
+        # 讀取表單 (這裡不快取編號，只快取資料結構)
+        try:
+            ws_f = sh.get_worksheet(0)
+            if ws_f:
+                data = ws_f.get_all_values()
+                if len(data) > 1:
+                    headers = clean_headers(data[0])
+                    df_b = pd.DataFrame(data[1:], columns=headers)
+                    # 移除全空行，或編號為空的行
+                    if '編號' in df_b.columns:
+                        df_b = df_b[df_b['編號'].astype(str).str.strip() != '']
+                    else:
+                        df_b = df_b.replace(r'^\s*$', pd.NA, regex=True).dropna(how='all')
+                else: df_b = pd.DataFrame()
+            else: df_b = pd.DataFrame()
+        except: df_b = pd.DataFrame()
+             
+        return cd, df_b
+    except Exception as e:
+        st.error(f"連線失敗: {e}")
+        return {}, pd.DataFrame()
+
+# ⭐⭐⭐ 修正版：根據年份計算編號 (Robust) ⭐⭐⭐
 def calculate_next_id_for_year(df_all, target_year):
     """
-    從已讀取的資料表(df_all)中，找出 target_year 的最大編號
+    針對目標年份，找出目前最大的編號
     """
     if df_all.empty:
         return 1
         
-    # 1. 確保有編號和日期欄位
+    # 確保有必要欄位
     if '編號' not in df_all.columns or '日期' not in df_all.columns:
         return 1
         
-    # 2. 複製一份資料來處理，避免影響原始資料
+    # 複製資料，避免改到原始檔
     df_temp = df_all[['編號', '日期']].copy()
     
-    # 3. 解析日期
+    # 翻譯日期
     df_temp['parsed_date'] = df_temp['日期'].apply(parse_taiwan_date)
     
-    # 4. 篩選出該年份的資料
-    # 注意：這裡我們要處理 NaT (無效日期)
+    # 篩選該年份的資料
     df_year = df_temp[df_temp['parsed_date'].dt.year == target_year]
     
+    # 如果該年份沒資料 -> 1
     if df_year.empty:
-        return 1 # 該年份還沒有資料，從 1 開始
-        
-    # 5. 找出該年份的最大編號
-    # 先轉成數字，過濾掉非數字的編號
-    ids = pd.to_numeric(df_year['編號'], errors='coerce').dropna()
-    
-    if ids.empty:
         return 1
-    else:
+        
+    # 轉數字找最大值
+    try:
+        ids = pd.to_numeric(df_year['編號'], errors='coerce').dropna()
+        if ids.empty:
+            return 1
         return int(ids.max()) + 1
+    except:
+        return 1
 
 # ==========================================
 # 🚀 主程式
@@ -264,6 +281,7 @@ def main():
         company_dict, df_business = load_data_from_gsheet()
 
     if menu == "📝 新增業務登記":
+        
         if 'ex_res' not in st.session_state: st.session_state['ex_res'] = ""
         if 'inv_list' not in st.session_state: st.session_state['inv_list'] = []
 
@@ -271,14 +289,14 @@ def main():
             st.markdown("### 🏢 客戶與基本資料")
             c1, c2 = st.columns(2)
             with c1:
-                # 1. 選擇日期 (這一步最重要)
+                # 1. 日期選擇
                 input_date = st.date_input("📅 填表日期", datetime.today())
+                target_year = input_date.year
                 
-                # 2. ⭐⭐ 即時計算該年份的下一個編號 ⭐⭐
-                # 這裡使用已經載入的 df_business 來計算，速度快又準
-                current_year = input_date.year
-                next_id = calculate_next_id_for_year(df_business, current_year)
+                # 2. 即時計算該年份編號
+                next_id = calculate_next_id_for_year(df_business, target_year)
                 
+                # 3. 分類與客戶
                 cat_options = list(company_dict.keys()) + ["➕ 新增類別..."]
                 selected_cat = st.selectbox("📂 客戶類別", cat_options)
                 if selected_cat == "➕ 新增類別...":
@@ -295,13 +313,27 @@ def main():
                     final_client = selected_client
 
             with c2:
-                # 顯示包含年份的編號提示
+                # 顯示年份與編號，並加入除錯資訊 (Expander)
                 st.metric(
-                    label=f"✨ {current_year} 年度下一個編號", 
+                    label=f"✨ {target_year} 年度下一個編號", 
                     value=f"No. {next_id}", 
                     delta="Auto"
                 )
                 
+                # ⭐ 除錯視窗：讓您確認程式讀到了什麼 ⭐
+                with st.expander("🕵️‍♂️ 編號診斷 (若編號不對請點此)"):
+                    st.write(f"目前選擇年份: {target_year}")
+                    if not df_business.empty and '日期' in df_business.columns:
+                        # 顯示該年份目前已有的編號
+                        debug_df = df_business.copy()
+                        debug_df['parsed_date'] = debug_df['日期'].apply(parse_taiwan_date)
+                        year_data = debug_df[debug_df['parsed_date'].dt.year == target_year]
+                        st.write(f"系統在資料庫找到 {len(year_data)} 筆 {target_year} 年的資料:")
+                        if not year_data.empty:
+                            st.dataframe(year_data[['編號', '日期', '客戶名稱']], use_container_width=True)
+                    else:
+                        st.write("資料庫是空的，或無法讀取。")
+
                 project_no = st.text_input("🔖 案號 / 產品名稱")
                 price = st.number_input("💰 完稅價格 (TWD)", min_value=0, step=1000, format="%d", value=0)
                 remark = st.text_area("📝 備註", height=100)
@@ -324,7 +356,6 @@ def main():
                             if new_inv_date not in st.session_state['inv_list']:
                                 st.session_state['inv_list'].append(new_inv_date)
                                 st.session_state['inv_list'].sort()
-                    
                     if st.session_state['inv_list']:
                         date_strs = [d.strftime('%Y-%m-%d') for d in st.session_state['inv_list']]
                         st.caption(f"已加入: {', '.join(date_strs)}")
@@ -377,21 +408,17 @@ def main():
                 ds_str = input_date.strftime("%Y-%m-%d")
                 eds_str = ex_del.strftime("%Y-%m-%d") if has_delivery and ex_del else ""
                 pds_str = pay_d.strftime("%Y-%m-%d") if has_pay and pay_d else ""
-                
-                if has_inv and st.session_state['inv_list']:
-                    ids_str = ", ".join([d.strftime('%Y-%m-%d') for d in st.session_state['inv_list']])
-                else:
-                    ids_str = ""
+                ids_str = ", ".join([d.strftime('%Y-%m-%d') for d in st.session_state['inv_list']]) if has_inv and st.session_state['inv_list'] else ""
 
                 data_to_save = {
-                    "編號": next_id, # 使用自動計算的年份編號
+                    "編號": next_id,
                     "日期": ds_str,
                     "客戶類別": final_cat,
                     "客戶名稱": final_client,
                     "案號": project_no,
                     "完稅價格": price if price > 0 else "",
                     "預定交期": eds_str,
-                    "發票日期": ids_str, 
+                    "發票日期": ids_str,
                     "收款日期": pds_str,
                     "進出口匯率": final_ex,
                     "備註": remark,
