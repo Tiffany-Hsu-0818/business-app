@@ -92,7 +92,25 @@ def smart_append_to_gsheet(data_dict):
         client = get_google_sheet_client()
         sh = client.open_by_key(SPREADSHEET_KEY)
         ws = sh.get_worksheet(0)
-        headers = ws.row_values(1)
+        
+        # ⭐ 修正：同樣使用自動搜尋標題的邏輯
+        all_values = ws.get_all_values()
+        header_row_idx = 0
+        headers = []
+        
+        # 找標題
+        for i, row in enumerate(all_values[:5]):
+            row_str = [str(r).strip() for r in row]
+            if "編號" in row_str and "日期" in row_str:
+                header_row_idx = i
+                headers = row # 原始標題
+                break
+        
+        if not headers:
+            # 如果真的找不到，只好假設第一行
+            headers = ws.row_values(1)
+            header_row_idx = 0
+
         row_to_append = [""] * len(headers)
         
         for col_name, value in data_dict.items():
@@ -113,23 +131,57 @@ def update_records_in_gsheet(edited_df):
         client = get_google_sheet_client()
         sh = client.open_by_key(SPREADSHEET_KEY)
         ws = sh.get_worksheet(0)
-        all_ids = ws.col_values(1) 
-        headers = ws.row_values(1)
+        
+        # ⭐ 修正：取得正確的標題列和 ID 列
+        all_values = ws.get_all_values()
+        header_row_idx = 0
+        headers = []
+        for i, row in enumerate(all_values[:5]):
+            row_str = [str(r).strip() for r in row]
+            if "編號" in row_str and "日期" in row_str:
+                header_row_idx = i
+                headers = row
+                break
+        
+        if not headers: return False
+
+        # ID 欄位在哪裡?
+        try:
+            id_col_idx = headers.index("編號")
+        except:
+            return False
+
+        # 重新抓取所有編號 (注意要跳過標題上面的空白列)
+        # col_values 抓的是整欄，我們需要對應到正確的 row index
+        # 最簡單的方法是重讀一次整欄，然後根據 index 加上 (header_row_idx + 1)
+        
+        # 這裡為了安全，我們直接讀取整欄資料
+        all_col_values = ws.col_values(id_col_idx + 1) # gspread 是 1-based index
         
         for index, row in edited_df.iterrows():
             target_id = str(row['編號'])
             try:
-                row_idx = all_ids.index(target_id) + 1 
+                # 在列表中找 ID
+                # row_in_list 是從 0 開始的 index
+                row_in_list = all_col_values.index(target_id)
+                
+                # 換算成 Google Sheet 的實際 Row Number
+                # gspread row = row_in_list + 1
+                actual_row_idx = row_in_list + 1
+                
                 row_data = []
                 for h in headers:
                     val = row.get(h, "")
                     if isinstance(val, (pd.Timestamp, datetime)):
                         val = val.strftime('%Y-%m-%d')
-                    if pd.isna(val):
-                        val = ""
+                    if pd.isna(val): val = ""
                     row_data.append(val)
                 
-                ws.update(f"A{row_idx}", [row_data], value_input_option='USER_ENTERED')
+                # 檢查 ID 是否正確才更新 (雙重確認)
+                if str(all_col_values[row_in_list]) == target_id:
+                    # 建立 Range 字串，例如 A5
+                    ws.update(f"A{actual_row_idx}", [row_data], value_input_option='USER_ENTERED')
+                
             except ValueError:
                 continue
         return True
@@ -154,36 +206,21 @@ def get_yahoo_rate(target_currency, query_date, inverse=False):
         check_date -= timedelta(days=1)
     return None, None, "無法取得匯率"
 
-# ⭐⭐⭐ 終極版日期翻譯機 ⭐⭐⭐
 def parse_taiwan_date(date_str):
     if pd.isna(date_str) or str(date_str).strip() == "":
         return pd.NaT
-    
-    # 1. 處理逗號分隔 (只取第一個)
-    s = str(date_str).split(',')[0].strip()
-    # 2. 統一分隔符
-    s = s.replace(".", "/")
-    
+    s = str(date_str).split(',')[0].strip().replace(".", "/")
     try:
         parts = s.split('/')
-        
-        # 情況 A: 只有 月/日 (例如 1/6)
         if len(parts) == 2:
             this_year = datetime.now().year
             return pd.to_datetime(f"{this_year}-{parts[0]}-{parts[1]}")
-            
-        # 情況 B: 有 年/月/日 (例如 114/1/6 或 2025/1/6)
         elif len(parts) == 3:
             year_val = int(parts[0])
-            # 如果是民國年 (小於 1911)，自動 +1911 轉西元
-            if year_val < 1911:
-                year_val += 1911
+            if year_val < 1911: year_val += 1911
             return pd.to_datetime(f"{year_val}-{parts[1]}-{parts[2]}")
-            
-        # 情況 C: 嘗試標準格式
         else:
             return pd.to_datetime(s)
-            
     except:
         return pd.NaT
 
@@ -193,7 +230,7 @@ def load_data_from_gsheet():
         client = get_google_sheet_client()
         sh = client.open_by_key(SPREADSHEET_KEY)
         
-        # 讀取公司
+        # 1. 讀取公司
         try:
             ws_c = sh.get_worksheet(1)
             if ws_c:
@@ -207,61 +244,58 @@ def load_data_from_gsheet():
             else: cd = {}
         except: cd = {}
 
-        # 讀取表單 (這裡不快取編號，只快取資料結構)
+        # 2. 讀取表單 (⭐ 關鍵修正：自動尋找標題列 ⭐)
         try:
             ws_f = sh.get_worksheet(0)
             if ws_f:
-                data = ws_f.get_all_values()
-                if len(data) > 1:
-                    headers = clean_headers(data[0])
-                    df_b = pd.DataFrame(data[1:], columns=headers)
-                    # 移除全空行，或編號為空的行
+                all_values = ws_f.get_all_values()
+                
+                # 尋找標題列
+                header_idx = -1
+                for i, row in enumerate(all_values[:5]): # 掃描前5行
+                    r_str = [str(r).strip() for r in row]
+                    if "編號" in r_str and "日期" in r_str:
+                        header_idx = i
+                        break
+                
+                if header_idx != -1 and len(all_values) > header_idx + 1:
+                    headers = clean_headers(all_values[header_idx])
+                    df_b = pd.DataFrame(all_values[header_idx+1:], columns=headers)
+                    
                     if '編號' in df_b.columns:
-                        df_b = df_b[df_b['編號'].astype(str).str.strip() != '']
+                        # 移除編號為空，或不是數字的列
+                        df_b = df_b[pd.to_numeric(df_b['編號'], errors='coerce').notna()]
                     else:
-                        df_b = df_b.replace(r'^\s*$', pd.NA, regex=True).dropna(how='all')
-                else: df_b = pd.DataFrame()
+                        df_b = pd.DataFrame()
+                else:
+                    # 找不到標題列，回傳空表
+                    df_b = pd.DataFrame()
             else: df_b = pd.DataFrame()
-        except: df_b = pd.DataFrame()
+        except Exception as e: 
+            print(e)
+            df_b = pd.DataFrame()
              
         return cd, df_b
     except Exception as e:
         st.error(f"連線失敗: {e}")
         return {}, pd.DataFrame()
 
-# ⭐⭐⭐ 修正版：根據年份計算編號 (Robust) ⭐⭐⭐
+# 重新加入：年份編號計算 (依賴 load_data 的結果)
 def calculate_next_id_for_year(df_all, target_year):
-    """
-    針對目標年份，找出目前最大的編號
-    """
-    if df_all.empty:
-        return 1
-        
-    # 確保有必要欄位
-    if '編號' not in df_all.columns or '日期' not in df_all.columns:
-        return 1
-        
-    # 複製資料，避免改到原始檔
+    if df_all.empty: return 1
+    if '編號' not in df_all.columns or '日期' not in df_all.columns: return 1
+    
     df_temp = df_all[['編號', '日期']].copy()
-    
-    # 翻譯日期
     df_temp['parsed_date'] = df_temp['日期'].apply(parse_taiwan_date)
-    
-    # 篩選該年份的資料
     df_year = df_temp[df_temp['parsed_date'].dt.year == target_year]
     
-    # 如果該年份沒資料 -> 1
-    if df_year.empty:
-        return 1
-        
-    # 轉數字找最大值
+    if df_year.empty: return 1
+    
     try:
         ids = pd.to_numeric(df_year['編號'], errors='coerce').dropna()
-        if ids.empty:
-            return 1
+        if ids.empty: return 1
         return int(ids.max()) + 1
-    except:
-        return 1
+    except: return 1
 
 # ==========================================
 # 🚀 主程式
@@ -281,7 +315,6 @@ def main():
         company_dict, df_business = load_data_from_gsheet()
 
     if menu == "📝 新增業務登記":
-        
         if 'ex_res' not in st.session_state: st.session_state['ex_res'] = ""
         if 'inv_list' not in st.session_state: st.session_state['inv_list'] = []
 
@@ -289,14 +322,12 @@ def main():
             st.markdown("### 🏢 客戶與基本資料")
             c1, c2 = st.columns(2)
             with c1:
-                # 1. 日期選擇
                 input_date = st.date_input("📅 填表日期", datetime.today())
-                target_year = input_date.year
                 
-                # 2. 即時計算該年份編號
+                # ⭐ 使用 Dataframe 計算年份編號 (最穩) ⭐
+                target_year = input_date.year
                 next_id = calculate_next_id_for_year(df_business, target_year)
                 
-                # 3. 分類與客戶
                 cat_options = list(company_dict.keys()) + ["➕ 新增類別..."]
                 selected_cat = st.selectbox("📂 客戶類別", cat_options)
                 if selected_cat == "➕ 新增類別...":
@@ -313,26 +344,25 @@ def main():
                     final_client = selected_client
 
             with c2:
-                # 顯示年份與編號，並加入除錯資訊 (Expander)
-                st.metric(
-                    label=f"✨ {target_year} 年度下一個編號", 
-                    value=f"No. {next_id}", 
-                    delta="Auto"
-                )
+                st.metric(label=f"✨ {target_year} 年度下一個編號", value=f"No. {next_id}", delta="Auto")
                 
-                # ⭐ 除錯視窗：讓您確認程式讀到了什麼 ⭐
-                with st.expander("🕵️‍♂️ 編號診斷 (若編號不對請點此)"):
-                    st.write(f"目前選擇年份: {target_year}")
+                # ⭐ 安全除錯視窗 (不會當機版) ⭐
+                with st.expander("🕵️‍♂️ 編號診斷"):
+                    st.write(f"系統正在尋找年份為 {target_year} 的舊資料...")
                     if not df_business.empty and '日期' in df_business.columns:
-                        # 顯示該年份目前已有的編號
                         debug_df = df_business.copy()
                         debug_df['parsed_date'] = debug_df['日期'].apply(parse_taiwan_date)
                         year_data = debug_df[debug_df['parsed_date'].dt.year == target_year]
-                        st.write(f"系統在資料庫找到 {len(year_data)} 筆 {target_year} 年的資料:")
-                        if not year_data.empty:
-                            st.dataframe(year_data[['編號', '日期', '客戶名稱']], use_container_width=True)
+                        st.write(f"找到 {len(year_data)} 筆資料。")
+                        
+                        # 安全顯示：只顯示存在的欄位
+                        cols_to_show = [c for c in ['編號', '日期', '客戶名稱'] if c in year_data.columns]
+                        if not year_data.empty and cols_to_show:
+                            st.dataframe(year_data[cols_to_show].head(), use_container_width=True)
+                        else:
+                            st.write("沒有找到該年份的有效資料 (或是編號/日期欄位讀取失敗)。")
                     else:
-                        st.write("資料庫是空的，或無法讀取。")
+                        st.write("⚠️ 警告：無法讀取到任何有效的業務資料。請檢查 Google Sheet 標題列是否正確 (必須包含「編號」與「日期」)。")
 
                 project_no = st.text_input("🔖 案號 / 產品名稱")
                 price = st.number_input("💰 完稅價格 (TWD)", min_value=0, step=1000, format="%d", value=0)
@@ -455,7 +485,7 @@ def main():
                 
                 date_col = next((c for c in df_clean.columns if '日期' in c), None)
                 if date_col:
-                    potential_date_cols = ['日期', '預定交期', '收款日期'] 
+                    potential_date_cols = ['日期', '預定交期', '收款日期']
                     for col in potential_date_cols:
                         if col in df_clean.columns:
                             df_clean[col] = df_clean[col].apply(parse_taiwan_date)
