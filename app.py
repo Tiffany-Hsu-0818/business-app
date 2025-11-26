@@ -93,7 +93,7 @@ def smart_append_to_gsheet(data_dict):
         sh = client.open_by_key(SPREADSHEET_KEY)
         ws = sh.get_worksheet(0)
         
-        # 自動尋找標題列 (避免第一行是空白)
+        # 自動尋找標題列
         all_values = ws.get_all_values()
         header_row_idx = 0
         headers = []
@@ -105,7 +105,6 @@ def smart_append_to_gsheet(data_dict):
                 break
         
         if not headers: 
-            # 沒找到標題，嘗試用第一行
             if all_values: headers = all_values[0]
             else: return False
 
@@ -173,7 +172,23 @@ def update_records_in_gsheet(edited_df):
         st.error(f"更新失敗: {e}")
         return False
 
-# 統一日期翻譯
+def get_yahoo_rate(target_currency, query_date, inverse=False):
+    ticker_symbol = f"{target_currency}TWD=X"
+    check_date = query_date
+    for _ in range(5):
+        try:
+            start_d = check_date.strftime("%Y-%m-%d")
+            end_d = (check_date + timedelta(days=1)).strftime("%Y-%m-%d")
+            df = yf.download(ticker_symbol, start=start_d, end=end_d, progress=False)
+            if not df.empty:
+                try: raw_rate = float(df['Close'].iloc[0])
+                except: raw_rate = float(df['Close'].values[0])
+                if inverse: return 1 / raw_rate, check_date, None
+                else: return raw_rate, check_date, None
+        except: pass
+        check_date -= timedelta(days=1)
+    return None, None, "無法取得匯率"
+
 def parse_taiwan_date(date_str):
     if pd.isna(date_str) or str(date_str).strip() == "":
         return pd.NaT
@@ -227,9 +242,7 @@ def load_data_from_gsheet():
                 if header_idx != -1 and len(all_values) > header_idx + 1:
                     headers = clean_headers(all_values[header_idx])
                     df_b = pd.DataFrame(all_values[header_idx+1:], columns=headers)
-                    
                     if '編號' in df_b.columns:
-                        # 把編號為空或包含 "Total" 之類的列移除
                         df_b = df_b[pd.to_numeric(df_b['編號'], errors='coerce').notna()]
                     else:
                         df_b = pd.DataFrame()
@@ -243,53 +256,21 @@ def load_data_from_gsheet():
         st.error(f"連線失敗: {e}")
         return {}, pd.DataFrame()
 
-def get_yahoo_rate(target_currency, query_date, inverse=False):
-    ticker_symbol = f"{target_currency}TWD=X"
-    check_date = query_date
-    for _ in range(5):
-        try:
-            start_d = check_date.strftime("%Y-%m-%d")
-            end_d = (check_date + timedelta(days=1)).strftime("%Y-%m-%d")
-            df = yf.download(ticker_symbol, start=start_d, end=end_d, progress=False)
-            if not df.empty:
-                try: raw_rate = float(df['Close'].iloc[0])
-                except: raw_rate = float(df['Close'].values[0])
-                if inverse: return 1 / raw_rate, check_date, None
-                else: return raw_rate, check_date, None
-        except: pass
-        check_date -= timedelta(days=1)
-    return None, None, "無法取得匯率"
-
-# ⭐⭐⭐ 核心邏輯：只計算「該年度」的最大編號 ⭐⭐⭐
 def calculate_next_id_for_year(df_all, target_year):
-    """
-    輸入：完整的資料表 (df_all), 使用者選擇的年份 (target_year)
-    輸出：該年份應該用的下一個號碼
-    """
     if df_all.empty: return 1
     if '編號' not in df_all.columns or '日期' not in df_all.columns: return 1
     
-    # 建立副本
     df_temp = df_all[['編號', '日期']].copy()
-    
-    # 解析日期
     df_temp['parsed_date'] = df_temp['日期'].apply(parse_taiwan_date)
-    
-    # ❗ 只篩選出「目標年份」的資料
-    # 如果 target_year 是 2024，這裡就只會留下 2024 的單
     df_year = df_temp[df_temp['parsed_date'].dt.year == target_year]
     
-    # 如果該年份完全沒資料 -> 從 1 開始
-    if df_year.empty:
-        return 1
-        
-    # 如果有資料 -> 找最大值 + 1
+    if df_year.empty: return 1
+    
     try:
         ids = pd.to_numeric(df_year['編號'], errors='coerce').dropna()
         if ids.empty: return 1
         return int(ids.max()) + 1
-    except:
-        return 1
+    except: return 1
 
 # ==========================================
 # 🚀 主程式
@@ -316,12 +297,8 @@ def main():
             st.markdown("### 🏢 客戶與基本資料")
             c1, c2 = st.columns(2)
             with c1:
-                # ⭐ 1. 使用者選日期
                 input_date = st.date_input("📅 填表日期", datetime.today())
-                target_year = input_date.year # 抓出年份 (例如 2024)
-                
-                # ⭐ 2. 馬上計算該年份的編號
-                # 這裡會把 df_business (所有資料) 和 target_year (2024) 丟進去算
+                target_year = input_date.year
                 next_id = calculate_next_id_for_year(df_business, target_year)
                 
                 cat_options = list(company_dict.keys()) + ["➕ 新增類別..."]
@@ -340,17 +317,10 @@ def main():
                     final_client = selected_client
 
             with c2:
-                # ⭐ 3. 顯示結果
-                st.metric(
-                    label=f"✨ {target_year} 年度下一個編號", 
-                    value=f"No. {next_id}", 
-                    delta="Auto"
-                )
+                st.metric(label=f"✨ {target_year} 年度下一個編號", value=f"No. {next_id}", delta="Auto")
                 
-                # 除錯視窗 (讓您安心)
                 with st.expander("🕵️‍♂️ 編號診斷"):
                     st.write(f"系統正在檢查 {target_year} 年的舊資料...")
-                    # 模擬篩選過程給您看
                     if not df_business.empty and '日期' in df_business.columns:
                         debug_df = df_business.copy()
                         debug_df['parsed_date'] = debug_df['日期'].apply(parse_taiwan_date)
@@ -360,7 +330,7 @@ def main():
                             st.info(f"📭 目前沒有找到 {target_year} 年的資料，所以編號從 1 開始。")
                         else:
                             max_val = pd.to_numeric(year_data['編號'], errors='coerce').max()
-                            st.success(f"✅ 找到 {len(year_data)} 筆資料，目前最大號碼是 {int(max_val)}，所以下一個是 {int(max_val)+1}。")
+                            st.success(f"✅ 找到 {len(year_data)} 筆資料，目前最大號碼是 {int(max_val)}。")
                             st.dataframe(year_data[['編號', '日期', '客戶名稱']].head())
                     else:
                         st.warning("尚未讀取到任何資料。")
@@ -371,12 +341,18 @@ def main():
 
         with st.container(border=True):
             st.markdown("### ⏰ 時程與財務設定")
-            d1, d2, d3 = st.columns(3)
+            
+            # ⭐⭐ 改成 4 欄，加入出貨日期 ⭐⭐
+            d1, d2, d3, d4 = st.columns(4)
             with d1: 
                 has_delivery = st.checkbox("已有預定交期?", value=False)
                 ex_del = st.date_input("🚚 預定交期", datetime.today()) if has_delivery else None
+            
+            with d2:
+                has_ship = st.checkbox("已有出貨日期?", value=False)
+                ship_d = st.date_input("🚚 出貨日期", datetime.today()) if has_ship else None
 
-            with d2: 
+            with d3: 
                 has_inv = st.checkbox("已有發票日期?", value=False)
                 if has_inv:
                     c_pick, c_add = st.columns([3, 1])
@@ -397,7 +373,7 @@ def main():
                     if st.session_state['inv_list']:
                         st.session_state['inv_list'] = []
 
-            with d3:
+            with d4:
                 has_pay = st.checkbox("已有收款日期?", value=False)
                 pay_d = st.date_input("💰 收款日期", datetime.today()) if has_pay else None
             
@@ -438,6 +414,7 @@ def main():
             else:
                 ds_str = input_date.strftime("%Y-%m-%d")
                 eds_str = ex_del.strftime("%Y-%m-%d") if has_delivery and ex_del else ""
+                ship_str = ship_d.strftime("%Y-%m-%d") if has_ship and ship_d else ""
                 pds_str = pay_d.strftime("%Y-%m-%d") if has_pay and pay_d else ""
                 ids_str = ", ".join([d.strftime('%Y-%m-%d') for d in st.session_state['inv_list']]) if has_inv and st.session_state['inv_list'] else ""
 
@@ -449,6 +426,7 @@ def main():
                     "案號": project_no,
                     "完稅價格": price if price > 0 else "",
                     "預定交期": eds_str,
+                    "出貨日期": ship_str, # 新增欄位
                     "發票日期": ids_str,
                     "收款日期": pds_str,
                     "進出口匯率": final_ex,
@@ -486,7 +464,8 @@ def main():
                 
                 date_col = next((c for c in df_clean.columns if '日期' in c), None)
                 if date_col:
-                    potential_date_cols = ['日期', '預定交期', '收款日期'] 
+                    # ⭐⭐ 加入 '出貨日期' 到轉換清單 ⭐⭐
+                    potential_date_cols = ['日期', '預定交期', '收款日期', '出貨日期'] 
                     for col in potential_date_cols:
                         if col in df_clean.columns:
                             df_clean[col] = df_clean[col].apply(parse_taiwan_date)
@@ -540,6 +519,7 @@ def main():
                                 "完稅價格": st.column_config.NumberColumn("完稅價格", format="$%d"),
                                 "日期": st.column_config.DateColumn("日期", format="YYYY-MM-DD"),
                                 "預定交期": st.column_config.DateColumn("預定交期", format="YYYY-MM-DD"),
+                                "出貨日期": st.column_config.DateColumn("出貨日期", format="YYYY-MM-DD"), # 新增
                                 "收款日期": st.column_config.DateColumn("收款日期", format="YYYY-MM-DD"),
                                 "發票日期": st.column_config.TextColumn("發票日期 (可多筆)"),
                             }
