@@ -78,67 +78,30 @@ def smart_append_to_gsheet(data_dict):
         st.error(f"寫入失敗: {e}")
         return False
 
-# ⭐ 新增：根據編號更新資料 (Update)
 def update_records_in_gsheet(edited_df):
-    """
-    功能：接收修改後的 DataFrame，根據「編號」去 Google Sheet 更新對應的列。
-    """
     try:
         client = get_google_sheet_client()
         sh = client.open_by_key(SPREADSHEET_KEY)
         ws = sh.get_worksheet(0)
-        
-        # 1. 取得所有資料以尋找列號 (Row Index)
-        # 這裡我們只抓第一欄(編號)來對照，速度較快
-        all_ids = ws.col_values(1) # 第一欄是編號
-        
-        # 2. 準備批次更新的清單
-        # 雖然 gspread 有 batch_update，但為了保險起見(避免格式跑掉)，我們逐列更新有變動的
-        # 為了效能，我們假設使用者一次只改幾筆，所以逐筆更新是可以接受的
-        
-        # 取得標題列以確保欄位順序正確
+        all_ids = ws.col_values(1) 
         headers = ws.row_values(1)
         
         for index, row in edited_df.iterrows():
             target_id = str(row['編號'])
-            
             try:
-                # 找出這個 ID 在 Google Sheet 是第幾列 (Row Number)
-                # index 是從 0 開始，所以 +1。 Google Sheet 第一列是標題，從第二列開始找。
-                # list.index() 若找不到會報錯
                 row_idx = all_ids.index(target_id) + 1 
-                
-                # 準備要更新的那一列資料 (依照 Google Sheet 的標題順序)
                 row_data = []
                 for h in headers:
-                    # 嘗試從 dataframe 找對應的欄位值
                     val = row.get(h, "")
-                    
-                    # 處理日期格式，轉回字串
                     if isinstance(val, (pd.Timestamp, datetime)):
                         val = val.strftime('%Y-%m-%d')
-                    
-                    # 處理 NaN
                     if pd.isna(val):
                         val = ""
-                        
                     row_data.append(val)
                 
-                # 執行更新 (更新該列的所有欄位)
-                # range_name 例如 'A2:Z2'
-                # 這裡我們用 row_idx 來定位
-                
-                # 為了避免覆蓋到我們沒讀到的欄位(如果有)，我們只更新我們有的欄位長度
-                # 但因為我們是讀整張表，所以整列覆蓋是安全的
-                
-                # 更新該列
-                # gspread 的 update 需要 list of list
                 ws.update(f"A{row_idx}", [row_data], value_input_option='USER_ENTERED')
-                
             except ValueError:
-                st.warning(f"⚠️ 找不到編號 {target_id} 的原始資料，無法更新該筆。")
                 continue
-                
         return True
     except Exception as e:
         st.error(f"更新失敗: {e}")
@@ -372,20 +335,26 @@ def main():
             try:
                 df_clean = df_business.copy()
                 
-                # 1. 金額轉數字
                 price_col = next((c for c in df_clean.columns if '價格' in c or '金額' in c), None)
                 if price_col:
                     df_clean[price_col] = df_clean[price_col].astype(str).str.replace(',', '').replace('', '0')
                     df_clean[price_col] = pd.to_numeric(df_clean[price_col], errors='coerce').fillna(0)
                 
-                # 2. 日期轉 datetime
                 date_col = next((c for c in df_clean.columns if '日期' in c), None)
                 if date_col:
-                    df_clean['converted_date'] = df_clean[date_col].apply(parse_taiwan_date)
-                    df_valid = df_clean.dropna(subset=['converted_date']).copy()
+                    # --- ⭐ 關鍵修正區：在編輯前先強制轉換所有日期欄位 ⭐ ---
+                    # 1. 找出所有可能是日期的欄位
+                    potential_date_cols = ['日期', '預定交期', '發票日期', '收款日期']
+                    # 2. 逐一進行翻譯
+                    for col in potential_date_cols:
+                        if col in df_clean.columns:
+                            df_clean[col] = df_clean[col].apply(parse_taiwan_date)
+                    
+                    # 主要日期欄位如果是 NaT 就丟掉 (僅限於主日期欄位)
+                    df_valid = df_clean.dropna(subset=[date_col]).copy()
                     
                     if not df_valid.empty:
-                        df_valid['Year'] = df_valid['converted_date'].dt.year
+                        df_valid['Year'] = df_valid[date_col].dt.year
                         
                         all_years = sorted(df_valid['Year'].unique().astype(int), reverse=True)
                         selected_year = st.selectbox("📅 請選擇年份", all_years)
@@ -394,7 +363,6 @@ def main():
                         
                         st.markdown(f"### 📊 {selected_year} 年度總覽")
                         
-                        # --- KPI & Charts ---
                         total_rev = df_final[price_col].sum()
                         total_count = len(df_final)
                         k1, k2, k3 = st.columns(3)
@@ -412,62 +380,47 @@ def main():
                                 st.plotly_chart(fig_pie, use_container_width=True)
                         with c2:
                             st.subheader("📅 每月業績趨勢")
-                            df_monthly = df_final.resample('M', on='converted_date')[price_col].sum().reset_index()
+                            df_monthly = df_final.resample('M', on=date_col)[price_col].sum().reset_index()
                             if not df_monthly.empty:
-                                df_monthly['Month_Str'] = df_monthly['converted_date'].dt.strftime('%Y-%m')
+                                df_monthly['Month_Str'] = df_monthly[date_col].dt.strftime('%Y-%m')
                                 fig_bar = px.bar(df_monthly, x='Month_Str', y=price_col, 
                                                  title="月營收分佈", labels={'Month_Str':'月份', price_col:'金額'})
                                 st.plotly_chart(fig_bar, use_container_width=True)
 
-                        # --- ⭐⭐ 關鍵修改區：可編輯的表格 (Editable Data Editor) ⭐⭐ ---
                         st.markdown("---")
                         st.subheader(f"📝 編輯 {selected_year} 年度資料")
                         st.info("💡 提示：直接點擊欄位即可修改，修改完請按下方「儲存變更」按鈕。")
                         
-                        # 準備要顯示的資料 (不顯示我們計算用的中間欄位)
-                        display_cols = [c for c in df_final.columns if c not in ['converted_date', 'Year']]
+                        # 整理要顯示的欄位 (排除計算用的)
+                        display_cols = [c for c in df_final.columns if c not in ['Year', 'converted_date']]
                         
-                        # 建立編輯器
+                        # 建立編輯器，這次日期已經是真正的 datetime 了！
                         edited_df = st.data_editor(
                             df_final[display_cols],
                             key="data_editor",
-                            num_rows="dynamic", # 允許新增列 (雖然我們建議去另一頁新增)
+                            num_rows="dynamic",
                             use_container_width=True,
                             column_config={
-                                "編號": st.column_config.NumberColumn(
-                                    "編號 (不可改)", 
-                                    disabled=True, # 鎖住編號，避免對應錯誤
-                                    format="%d"
-                                ),
-                                "完稅價格": st.column_config.NumberColumn(
-                                    "完稅價格",
-                                    format="$%d"
-                                ),
-                                "日期": st.column_config.DateColumn(
-                                    "日期",
-                                    format="YYYY-MM-DD",
-                                ),
-                                # 其他日期欄位也可以加上 DateColumn 讓它變好選
+                                "編號": st.column_config.NumberColumn("編號 (鎖定)", disabled=True, format="%d"),
+                                "完稅價格": st.column_config.NumberColumn("完稅價格", format="$%d"),
+                                "日期": st.column_config.DateColumn("日期", format="YYYY-MM-DD"),
                                 "預定交期": st.column_config.DateColumn("預定交期", format="YYYY-MM-DD"),
                                 "發票日期": st.column_config.DateColumn("發票日期", format="YYYY-MM-DD"),
                                 "收款日期": st.column_config.DateColumn("收款日期", format="YYYY-MM-DD"),
                             }
                         )
                         
-                        # 儲存按鈕
                         if st.button("💾 儲存變更", type="primary"):
                             with st.spinner("正在更新雲端資料庫..."):
                                 if update_records_in_gsheet(edited_df):
                                     st.success("✅ 更新成功！")
-                                    st.cache_data.clear() # 清除快取，強制重整
+                                    st.cache_data.clear()
                                     time.sleep(1)
                                     st.rerun()
                                 else:
-                                    st.error("更新失敗，請檢查網路或聯絡管理員。")
-
+                                    st.error("更新失敗。")
                     else:
                         st.warning("日期解析後無資料。")
-                        st.dataframe(df_business)
                 else:
                     st.error("找不到日期欄位。")
             except Exception as e:
