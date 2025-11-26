@@ -242,7 +242,9 @@ def load_data_from_gsheet():
                     headers = clean_headers(all_values[header_idx])
                     df_b = pd.DataFrame(all_values[header_idx+1:], columns=headers)
                     if '編號' in df_b.columns:
-                        df_b = df_b[pd.to_numeric(df_b['編號'], errors='coerce').notna()]
+                        # 不移除任何行，保留完整結構以計算正確年份ID，但排除全空行
+                        df_b = df_b.dropna(how='all')
+                        # df_b = df_b[pd.to_numeric(df_b['編號'], errors='coerce').notna()] 
                     else:
                         df_b = pd.DataFrame()
                 else:
@@ -290,20 +292,57 @@ def main():
 
     if menu == "📝 新增業務登記":
         if 'ex_res' not in st.session_state: st.session_state['ex_res'] = ""
-        # 初始化多筆日期暫存
         if 'inv_list' not in st.session_state: st.session_state['inv_list'] = []
-        if 'pay_list' not in st.session_state: st.session_state['pay_list'] = [] # 新增收款暫存
+        if 'pay_list' not in st.session_state: st.session_state['pay_list'] = []
 
         with st.container(border=True):
             st.markdown("### 🏢 客戶與基本資料")
+            
+            # ⭐⭐ 1. 搜尋欄位 ⭐⭐
+            search_col, _ = st.columns([3, 1])
+            with search_col:
+                search_keyword = st.text_input("🔍 快速搜尋公司名稱 (自動填入)", placeholder="輸入部分名稱，例如：台積", help="輸入後按 Enter，下方欄位會自動切換")
+
+            # ⭐⭐ 2. 自動匹配邏輯 ⭐⭐
+            # 預設索引 (沒搜尋時顯示第一項)
+            default_cat_index = 0
+            default_client_index = 0
+            
+            # 如果有輸入搜尋關鍵字
+            found_cat = None
+            found_client = None
+            
+            if search_keyword:
+                for cat, clients in company_dict.items():
+                    for client in clients:
+                        if search_keyword in client:
+                            found_cat = cat
+                            found_client = client
+                            break
+                    if found_cat: break
+                
+                if found_client:
+                    st.success(f"已找到：{found_client} ({found_cat})")
+                else:
+                    st.warning("找不到符合的客戶，請手動選擇或新增。")
+
+            st.markdown("---")
+
             c1, c2 = st.columns(2)
             with c1:
                 input_date = st.date_input("📅 填表日期", datetime.today())
                 target_year = input_date.year
                 next_id = calculate_next_id_for_year(df_business, target_year)
                 
+                # --- 客戶類別選單 ---
                 cat_options = list(company_dict.keys()) + ["➕ 新增類別..."]
-                selected_cat = st.selectbox("📂 客戶類別", cat_options)
+                
+                # 計算類別索引
+                if found_cat and found_cat in cat_options:
+                    default_cat_index = cat_options.index(found_cat)
+                
+                selected_cat = st.selectbox("📂 客戶類別", cat_options, index=default_cat_index)
+                
                 if selected_cat == "➕ 新增類別...":
                     final_cat = st.text_input("✍️ 請輸入新類別名稱")
                     client_options = ["➕ 新增客戶..."]
@@ -311,7 +350,15 @@ def main():
                     final_cat = selected_cat
                     client_options = company_dict.get(selected_cat, []) + ["➕ 新增客戶..."]
 
-                selected_client = st.selectbox("👤 客戶名稱", client_options)
+                # --- 客戶名稱選單 ---
+                # 計算客戶索引 (必須確認該客戶在目前的 client_options 裡)
+                if found_client and found_client in client_options:
+                    default_client_index = client_options.index(found_client)
+                else:
+                    default_client_index = 0 # 找不到就歸零
+                
+                selected_client = st.selectbox("👤 客戶名稱", client_options, index=default_client_index)
+                
                 if selected_client == "➕ 新增客戶...":
                     final_client = st.text_input("✍️ 請輸入新客戶名稱")
                 else:
@@ -326,20 +373,16 @@ def main():
 
         with st.container(border=True):
             st.markdown("### ⏰ 時程與財務設定")
-            # 分成 4 欄
             d1, d2, d3, d4 = st.columns(4)
             
-            # 1. 預定交期
             with d1: 
                 has_delivery = st.checkbox("已有預定交期?", value=False)
                 ex_del = st.date_input("🚚 預定交期", datetime.today()) if has_delivery else None
 
-            # 2. 出貨日期
             with d2:
                 has_ship = st.checkbox("已有出貨日期?", value=False)
                 ship_d = st.date_input("🚚 出貨日期", datetime.today()) if has_ship else None
 
-            # 3. 發票日期 (多筆)
             with d3: 
                 has_inv = st.checkbox("已有發票日期?", value=False)
                 if has_inv:
@@ -355,13 +398,12 @@ def main():
                     if st.session_state['inv_list']:
                         date_strs = [d.strftime('%Y-%m-%d') for d in st.session_state['inv_list']]
                         st.caption(f"已加入: {', '.join(date_strs)}")
-                        if st.button("🗑️", key="clr_inv", help="清空發票日期"):
+                        if st.button("🗑️", key="clr_inv", help="清空"):
                             st.session_state['inv_list'] = []
                             st.rerun()
                 else:
                     if st.session_state['inv_list']: st.session_state['inv_list'] = []
 
-            # 4. 收款日期 (多筆 - 新增功能)
             with d4:
                 has_pay = st.checkbox("已有收款日期?", value=False)
                 if has_pay:
@@ -377,7 +419,7 @@ def main():
                     if st.session_state['pay_list']:
                         date_strs_p = [d.strftime('%Y-%m-%d') for d in st.session_state['pay_list']]
                         st.caption(f"已加入: {', '.join(date_strs_p)}")
-                        if st.button("🗑️", key="clr_pay", help="清空收款日期"):
+                        if st.button("🗑️", key="clr_pay", help="清空"):
                             st.session_state['pay_list'] = []
                             st.rerun()
                 else:
@@ -422,9 +464,7 @@ def main():
                 eds_str = ex_del.strftime("%Y-%m-%d") if has_delivery and ex_del else ""
                 ship_str = ship_d.strftime("%Y-%m-%d") if has_ship and ship_d else ""
                 
-                # 組合多筆發票日期
                 ids_str = ", ".join([d.strftime('%Y-%m-%d') for d in st.session_state['inv_list']]) if has_inv and st.session_state['inv_list'] else ""
-                # 組合多筆收款日期
                 pds_str = ", ".join([d.strftime('%Y-%m-%d') for d in st.session_state['pay_list']]) if has_pay and st.session_state['pay_list'] else ""
 
                 data_to_save = {
@@ -437,7 +477,7 @@ def main():
                     "預定交期": eds_str,
                     "出貨日期": ship_str, 
                     "發票日期": ids_str,
-                    "收款日期": pds_str, # 這裡存多筆
+                    "收款日期": pds_str,
                     "進出口匯率": final_ex,
                     "備註": remark,
                     "階段性款項": "" 
@@ -453,7 +493,7 @@ def main():
                     st.success(f"✅ 成功建立案件：No.{next_id}{update_msg}")
                     st.session_state['ex_res'] = ""
                     st.session_state['inv_list'] = []
-                    st.session_state['pay_list'] = [] # 清空
+                    st.session_state['pay_list'] = []
                     st.cache_data.clear()
                     time.sleep(3)
                     st.rerun()
@@ -474,7 +514,6 @@ def main():
                 
                 date_col = next((c for c in df_clean.columns if '日期' in c), None)
                 if date_col:
-                    # ⭐⭐ 關鍵修正：移除 '收款日期'，不轉 datetime ⭐⭐
                     potential_date_cols = ['日期', '預定交期', '出貨日期'] 
                     for col in potential_date_cols:
                         if col in df_clean.columns:
@@ -530,7 +569,6 @@ def main():
                                 "日期": st.column_config.DateColumn("日期", format="YYYY-MM-DD"),
                                 "預定交期": st.column_config.DateColumn("預定交期", format="YYYY-MM-DD"),
                                 "出貨日期": st.column_config.DateColumn("出貨日期", format="YYYY-MM-DD"),
-                                # ⭐ 收款日期改回文字欄位，因為可能多筆
                                 "收款日期": st.column_config.TextColumn("收款日期 (可多筆)"),
                                 "發票日期": st.column_config.TextColumn("發票日期 (可多筆)"),
                             }
