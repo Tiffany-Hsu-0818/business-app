@@ -300,10 +300,8 @@ def main():
         if is_edit:
             st.info("💡 目前為編輯模式。修改完畢請按下方「更新資料」按鈕。")
 
-        # 預設值設定
+        # 預設值
         def_date = datetime.today()
-        def_cat_idx = 0
-        def_client_idx = 0
         def_project = ""
         def_price = 0
         def_remark = ""
@@ -334,34 +332,58 @@ def main():
         with st.container(border=True):
             st.markdown("### 🏢 客戶與基本資料")
             
-            # === 功能 1: 快速搜尋 (回歸簡潔版，隱形支援台/臺互通) ===
+            # ==========================================
+            # 🔍 功能 1 改良：動態整合搜尋欄
+            # ==========================================
             def normalize_text(text):
                 """將所有 '臺' 轉為 '台' 以便比對"""
-                return str(text).replace('臺', '台')
+                return str(text).replace('臺', '台').strip()
 
-            search_col, _ = st.columns([3, 1])
-            with search_col:
-                search_keyword = st.text_input("🔍 快速搜尋 (輸入後按 Enter)", placeholder="例如：台積 (支援台/臺互通)")
+            # 1. 只有一個搜尋輸入框
+            search_keyword = st.text_input("🔍 快速搜尋客戶 (輸入後按 Enter)", placeholder="例如：台積 (支援台/臺互通)", key="search_input")
             
             found_cat, found_client = None, None
-            
-            # 搜尋邏輯：
-            # 1. 取得使用者輸入，轉為 '台'
-            # 2. 遍歷資料庫，也轉為 '台' 來比對
-            # 3. 找到就抓出來 (抓出來的會是原始資料庫的正確寫法)
+
             if search_keyword:
                 norm_key = normalize_text(search_keyword)
+                matches = []
+                
+                # 搜尋所有符合的結果
                 for cat, clients in company_dict.items():
                     for client in clients:
                         if norm_key in normalize_text(client):
-                            found_cat, found_client = cat, client
-                            break
-                    if found_cat: break
+                            matches.append(f"{client} ({cat})")
                 
-                if found_client: 
-                    st.success(f"已找到：{found_client} ({found_cat})")
-                else: 
-                    st.warning("找不到符合的客戶。")
+                # 2. 搜尋結果處理邏輯
+                if len(matches) == 0:
+                    st.warning("❌ 找不到符合的客戶，請直接於下方填寫。")
+                
+                elif len(matches) == 1:
+                    # 只有一個結果：直接選定，不顯示下拉選單
+                    target_str = matches[0]
+                    st.success(f"✅ 已自動填入：{target_str}")
+                    # 解析字串回傳 cat 與 client
+                    # 格式是 "ClientName (Category)"
+                    # 從後面找最後一個 '(' 來分割
+                    try:
+                        split_idx = target_str.rfind(" (")
+                        found_client = target_str[:split_idx]
+                        found_cat = target_str[split_idx+2:-1]
+                    except: pass
+                
+                else:
+                    # 有多個結果：在搜尋欄下方顯示下拉選單讓使用者選
+                    st.info(f"💡 找到 {len(matches)} 筆符合資料，請選擇：")
+                    selected_match = st.selectbox("請選擇正確的客戶", matches, index=0, label_visibility="collapsed")
+                    
+                    if selected_match:
+                        try:
+                            split_idx = selected_match.rfind(" (")
+                            found_client = selected_match[:split_idx]
+                            found_cat = selected_match[split_idx+2:-1]
+                        except: pass
+
+            # ==========================================
 
             st.markdown("---")
             c1, c2 = st.columns(2)
@@ -371,6 +393,7 @@ def main():
                 # 計算類別 Index
                 current_cat_opts = list(company_dict.keys()) + ["➕ 新增類別..."]
                 target_cat = found_cat if found_cat else (edit_data.get('客戶類別') if is_edit else None)
+                def_cat_idx = 0
                 try:
                     if target_cat in current_cat_opts:
                         def_cat_idx = current_cat_opts.index(target_cat)
@@ -387,6 +410,7 @@ def main():
 
                 # 計算客戶 Index
                 target_client = found_client if found_client else (edit_data.get('客戶名稱') if is_edit else None)
+                def_client_idx = 0
                 try:
                     if target_client in client_opts:
                         def_client_idx = client_opts.index(target_client)
