@@ -94,7 +94,6 @@ def load_data_from_gsheet():
             client = get_google_sheet_client()
             sh = client.open_by_key(SPREADSHEET_KEY)
             
-            # 讀取公司名單
             try:
                 ws_c = sh.get_worksheet(1)
                 if ws_c:
@@ -108,7 +107,6 @@ def load_data_from_gsheet():
                 else: cd = {}
             except: cd = {}
 
-            # 讀取業務紀錄
             try:
                 ws_f = sh.get_worksheet(0)
                 if ws_f:
@@ -139,9 +137,6 @@ def load_data_from_gsheet():
 # ==========================================
 
 def update_company_category_in_sheet(client_name, new_category):
-    """
-    功能 2：自動調整客戶類別
-    """
     try:
         client = get_google_sheet_client()
         sh = client.open_by_key(SPREADSHEET_KEY)
@@ -190,9 +185,6 @@ def update_company_category_in_sheet(client_name, new_category):
         return False, f"更新公司名單失敗: {e}"
 
 def smart_save_record(data_dict, is_update=False):
-    """
-    統一處理新增與更新
-    """
     for attempt in range(3):
         try:
             client = get_google_sheet_client()
@@ -294,17 +286,8 @@ def main():
     with st.spinner("資料載入中..."):
         company_dict, df_business = load_data_from_gsheet()
 
-    # 準備搜尋用的清單
-    search_list = []
-    client_to_cat_map = {}
-    for cat, clients in company_dict.items():
-        for client in clients:
-            label = f"{client} ({cat})"
-            search_list.append(label)
-            client_to_cat_map[label] = (cat, client)
-    
     # ========================================================
-    # 頁面 1: 業務登記 (包含新增與編輯模式)
+    # 頁面 1: 業務登記
     # ========================================================
     if st.session_state['current_page'] == "📝 新增業務登記":
         
@@ -317,7 +300,7 @@ def main():
         if is_edit:
             st.info("💡 目前為編輯模式。修改完畢請按下方「更新資料」按鈕。")
 
-        # 載入編輯預設值
+        # 預設值設定
         def_date = datetime.today()
         def_cat_idx = 0
         def_client_idx = 0
@@ -345,53 +328,54 @@ def main():
                 def_price = int(float(p_val)) if p_val and p_val.replace(".","").isdigit() else 0
                 def_remark = edit_data.get('備註', "")
                 def_ex_res = edit_data.get('進出口匯率', "")
-                
-            except Exception as e:
-                st.error(f"載入編輯資料錯誤: {e}")
+            except: pass
 
         # --- 表單 UI ---
         with st.container(border=True):
             st.markdown("### 🏢 客戶與基本資料")
             
-            # === 功能 1: 快速搜尋 (支援台/臺通用) ===
-            def normalize_search_text(text):
+            # === 功能 1: 快速搜尋 (回歸簡潔版，隱形支援台/臺互通) ===
+            def normalize_text(text):
+                """將所有 '臺' 轉為 '台' 以便比對"""
                 return str(text).replace('臺', '台')
 
-            col_search_input, col_search_select = st.columns([2, 3])
-            
-            with col_search_input:
-                search_keyword = st.text_input("🔍 搜尋 (支援台/臺互通)", placeholder="輸入如：台積電")
-
-            # 搜尋過濾邏輯
-            filtered_options = ["請選擇..."]
-            if search_keyword:
-                norm_keyword = normalize_search_text(search_keyword)
-                for label in search_list:
-                    if norm_keyword in normalize_search_text(label):
-                        filtered_options.append(label)
-                if len(filtered_options) == 1:
-                    filtered_options = ["❌ 查無符合資料，請直接填寫下方欄位"]
-
-            with col_search_select:
-                selected_search = st.selectbox("搜尋結果 (請點選)", filtered_options, index=0)
+            search_col, _ = st.columns([3, 1])
+            with search_col:
+                search_keyword = st.text_input("🔍 快速搜尋 (輸入後按 Enter)", placeholder="例如：台積 (支援台/臺互通)")
             
             found_cat, found_client = None, None
-            if selected_search and selected_search not in ["請選擇...", "❌ 查無符合資料，請直接填寫下方欄位"]:
-                found_cat, found_client = client_to_cat_map.get(selected_search, (None, None))
-
-            # === 填寫區 ===
-            current_cat_opts = list(company_dict.keys()) + ["➕ 新增類別..."]
-            target_cat = found_cat if found_cat else (edit_data.get('客戶類別') if is_edit else None)
-            try:
-                if target_cat in current_cat_opts:
-                    def_cat_idx = current_cat_opts.index(target_cat)
-            except: pass
+            
+            # 搜尋邏輯：
+            # 1. 取得使用者輸入，轉為 '台'
+            # 2. 遍歷資料庫，也轉為 '台' 來比對
+            # 3. 找到就抓出來 (抓出來的會是原始資料庫的正確寫法)
+            if search_keyword:
+                norm_key = normalize_text(search_keyword)
+                for cat, clients in company_dict.items():
+                    for client in clients:
+                        if norm_key in normalize_text(client):
+                            found_cat, found_client = cat, client
+                            break
+                    if found_cat: break
+                
+                if found_client: 
+                    st.success(f"已找到：{found_client} ({found_cat})")
+                else: 
+                    st.warning("找不到符合的客戶。")
 
             st.markdown("---")
             c1, c2 = st.columns(2)
             with c1:
                 input_date = st.date_input("📅 填表日期", def_date)
                 
+                # 計算類別 Index
+                current_cat_opts = list(company_dict.keys()) + ["➕ 新增類別..."]
+                target_cat = found_cat if found_cat else (edit_data.get('客戶類別') if is_edit else None)
+                try:
+                    if target_cat in current_cat_opts:
+                        def_cat_idx = current_cat_opts.index(target_cat)
+                except: pass
+
                 selected_cat = st.selectbox("📂 客戶類別", current_cat_opts, index=def_cat_idx, key="cat_box")
                 
                 if selected_cat == "➕ 新增類別...":
@@ -401,6 +385,7 @@ def main():
                     final_cat = selected_cat
                     client_opts = company_dict.get(selected_cat, []) + ["➕ 新增客戶..."]
 
+                # 計算客戶 Index
                 target_client = found_client if found_client else (edit_data.get('客戶名稱') if is_edit else None)
                 try:
                     if target_client in client_opts:
@@ -429,7 +414,6 @@ def main():
                 price = st.number_input("💰 完稅價格 (TWD)", min_value=0, step=1000, format="%d", value=def_price)
                 remark = st.text_area("📝 備註", height=100, value=def_remark)
 
-        # --- 財務與日期 ---
         with st.container(border=True):
             st.markdown("### ⏰ 時程與財務設定")
             
@@ -544,7 +528,6 @@ def main():
                     
                     if success:
                         msg_list = [msg]
-                        # === 功能 2: 自動調整客戶類別 ===
                         if final_client:
                             c_success, c_msg = update_company_category_in_sheet(final_client, final_cat)
                             if c_success: msg_list.append(c_msg)
@@ -565,7 +548,7 @@ def main():
                         st.error(f"儲存失敗: {msg}")
 
     # ========================================================
-    # 頁面 2: 數據戰情室 (包含功能 3: 點選跳轉編輯)
+    # 頁面 2: 數據戰情室
     # ========================================================
     elif st.session_state['current_page'] == "📊 數據戰情室":
         st.title("📊 數據戰情室")
@@ -600,7 +583,6 @@ def main():
                 k3.metric("平均客單價", f"${avg:,.0f}")
                 st.divider()
 
-                # === 功能 3: 點選編輯 ===
                 st.subheader(f"📝 {selected_year} 詳細資料 (點選列可編輯)")
                 st.info("💡 提示：**點選** 表格中的某一列，即可跳轉至編輯頁面修改資料。")
 
@@ -627,7 +609,6 @@ def main():
                     st.session_state['edit_data'] = row_dict
                     st.session_state['current_page'] = "📝 新增業務登記"
                     st.rerun()
-
             else:
                 st.error("資料表中找不到日期欄位，無法分析。")
 
