@@ -333,13 +333,12 @@ def main():
             st.markdown("### 🏢 客戶與基本資料")
             
             # ==========================================
-            # 🔍 功能 1 改良：動態整合搜尋欄
+            # 🔍 功能 1 改良：搜尋結果強制覆寫下拉選單
             # ==========================================
             def normalize_text(text):
                 """將所有 '臺' 轉為 '台' 以便比對"""
                 return str(text).replace('臺', '台').strip()
 
-            # 1. 只有一個搜尋輸入框
             search_keyword = st.text_input("🔍 快速搜尋客戶 (輸入後按 Enter)", placeholder="例如：台積 (支援台/臺互通)", key="search_input")
             
             found_cat, found_client = None, None
@@ -354,35 +353,40 @@ def main():
                         if norm_key in normalize_text(client):
                             matches.append(f"{client} ({cat})")
                 
-                # 2. 搜尋結果處理邏輯
+                # 處理搜尋結果
+                target_str = None
                 if len(matches) == 0:
                     st.warning("❌ 找不到符合的客戶，請直接於下方填寫。")
-                
                 elif len(matches) == 1:
-                    # 只有一個結果：直接選定，不顯示下拉選單
                     target_str = matches[0]
                     st.success(f"✅ 已自動填入：{target_str}")
-                    # 解析字串回傳 cat 與 client
-                    # 格式是 "ClientName (Category)"
-                    # 從後面找最後一個 '(' 來分割
+                else:
+                    st.info(f"💡 找到 {len(matches)} 筆符合資料，請選擇：")
+                    selected_match = st.selectbox("請選擇正確的客戶", matches, index=0, label_visibility="collapsed")
+                    if selected_match:
+                        target_str = selected_match
+
+                # 解析並【強制更新】下拉選單狀態
+                if target_str:
                     try:
                         split_idx = target_str.rfind(" (")
                         found_client = target_str[:split_idx]
                         found_cat = target_str[split_idx+2:-1]
+                        
+                        # ⭐ 關鍵修正：檢查 Session State 是否與搜尋結果一致，若不一致則強制覆寫並 Rerun
+                        need_rerun = False
+                        if found_cat and st.session_state.get('cat_box') != found_cat:
+                            st.session_state['cat_box'] = found_cat
+                            need_rerun = True
+                        
+                        if found_client and st.session_state.get('client_box') != found_client:
+                            st.session_state['client_box'] = found_client
+                            need_rerun = True
+                            
+                        if need_rerun:
+                            st.rerun()
                     except: pass
-                
-                else:
-                    # 有多個結果：在搜尋欄下方顯示下拉選單讓使用者選
-                    st.info(f"💡 找到 {len(matches)} 筆符合資料，請選擇：")
-                    selected_match = st.selectbox("請選擇正確的客戶", matches, index=0, label_visibility="collapsed")
-                    
-                    if selected_match:
-                        try:
-                            split_idx = selected_match.rfind(" (")
-                            found_client = selected_match[:split_idx]
-                            found_cat = selected_match[split_idx+2:-1]
-                        except: pass
-
+            
             # ==========================================
 
             st.markdown("---")
@@ -390,16 +394,20 @@ def main():
             with c1:
                 input_date = st.date_input("📅 填表日期", def_date)
                 
-                # 計算類別 Index
+                # 類別清單
                 current_cat_opts = list(company_dict.keys()) + ["➕ 新增類別..."]
-                target_cat = found_cat if found_cat else (edit_data.get('客戶類別') if is_edit else None)
-                def_cat_idx = 0
-                try:
+                
+                # 若無搜尋結果，嘗試使用編輯資料或預設
+                if not found_cat:
+                    target_cat = edit_data.get('客戶類別') if is_edit else None
                     if target_cat in current_cat_opts:
-                        def_cat_idx = current_cat_opts.index(target_cat)
-                except: pass
-
-                selected_cat = st.selectbox("📂 客戶類別", current_cat_opts, index=def_cat_idx, key="cat_box")
+                        try:
+                            # 這裡只做初始設定，若 session state 已有值 (例如搜尋過)，streamlit 會優先使用 session state
+                            def_cat_idx = current_cat_opts.index(target_cat)
+                        except: pass
+                
+                # 類別 Dropdown (key="cat_box")
+                selected_cat = st.selectbox("📂 客戶類別", current_cat_opts, key="cat_box")
                 
                 if selected_cat == "➕ 新增類別...":
                     final_cat = st.text_input("✍️ 請輸入新類別名稱")
@@ -408,18 +416,8 @@ def main():
                     final_cat = selected_cat
                     client_opts = company_dict.get(selected_cat, []) + ["➕ 新增客戶..."]
 
-                # 計算客戶 Index
-                target_client = found_client if found_client else (edit_data.get('客戶名稱') if is_edit else None)
-                def_client_idx = 0
-                try:
-                    if target_client in client_opts:
-                        def_client_idx = client_opts.index(target_client)
-                    else: def_client_idx = 0
-                except: def_client_idx = 0
-                
-                if def_client_idx >= len(client_opts): def_client_idx = 0
-                
-                selected_client = st.selectbox("👤 客戶名稱", client_opts, index=def_client_idx, key="client_box")
+                # 客戶 Dropdown (key="client_box")
+                selected_client = st.selectbox("👤 客戶名稱", client_opts, key="client_box")
                 
                 if selected_client == "➕ 新增客戶...":
                     final_client = st.text_input("✍️ 請輸入新客戶名稱")
