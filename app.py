@@ -12,32 +12,43 @@ import plotly.express as px
 try:
     import yfinance as yf
 except ImportError:
-    st.error("❌ 缺少必要套件！請確保 requirements.txt 有包含 yfinance")
-    st.stop()
+    pass # 允許在沒有 yfinance 的情況下執行，但功能會受限
 
 # ==========================================
 # 📍 設定區
 # ==========================================
 SPREADSHEET_KEY = '1Q1-JbHje0E-8QB0pu83OHN8jCPY8We9l2j1_7eZ8yas'
 
+# 初始化 Session State
+if 'current_page' not in st.session_state: st.session_state['current_page'] = "📝 新增業務登記"
+if 'edit_mode' not in st.session_state: st.session_state['edit_mode'] = False
+if 'edit_data' not in st.session_state: st.session_state['edit_data'] = {}
+if 'ex_res' not in st.session_state: st.session_state['ex_res'] = ""
+if 'inv_list' not in st.session_state: st.session_state['inv_list'] = []
+if 'pay_list' not in st.session_state: st.session_state['pay_list'] = []
+
 # ==========================================
-# ☁️ Google Sheets 連線
+# ☁️ Google Sheets 連線與工具函式
 # ==========================================
 def get_google_sheet_client():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    
     for attempt in range(3):
         try:
             if "gcp_service_account" in st.secrets:
                 key_dict = json.loads(st.secrets["gcp_service_account"]["json_content"])
                 creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
             else:
-                local_key_file = r'C:\Users\User\Desktop\業務登記表\service_account.json'
+                local_key_file = r'service_account.json' # 請確保路徑正確或使用 secrets
                 if os.path.exists(local_key_file):
                     creds = ServiceAccountCredentials.from_json_keyfile_name(local_key_file, scope)
                 else:
-                    st.error("❌ 找不到金鑰！")
-                    st.stop()
+                    # 本地找不到就試著用預設路徑 (相容舊程式碼)
+                    local_key_file_old = r'C:\Users\User\Desktop\業務登記表\service_account.json'
+                    if os.path.exists(local_key_file_old):
+                        creds = ServiceAccountCredentials.from_json_keyfile_name(local_key_file_old, scope)
+                    else:
+                        st.error("❌ 找不到金鑰檔案 (service_account.json)！")
+                        st.stop()
             return gspread.authorize(creds)
         except Exception as e:
             if "503" in str(e):
@@ -62,128 +73,6 @@ def clean_headers(headers):
         cleaned.append(c)
     return cleaned
 
-def save_new_company_to_sheet(new_cat, new_client):
-    try:
-        client = get_google_sheet_client()
-        sh = client.open_by_key(SPREADSHEET_KEY)
-        ws_company = sh.get_worksheet(1) 
-        if not ws_company: return False, "找不到公司名單"
-
-        headers = ws_company.row_values(1)
-        headers = [h.strip() for h in headers if h.strip()]
-        
-        if new_cat in headers:
-            col_idx = headers.index(new_cat) + 1
-            existing_clients = ws_company.col_values(col_idx)
-            if new_client not in existing_clients:
-                next_row = len(existing_clients) + 1
-                ws_company.update_cell(next_row, col_idx, new_client)
-                return True, f"已將「{new_client}」加入名單！"
-            return True, "客戶已存在。"
-        else:
-            new_col_idx = len(headers) + 1
-            ws_company.update_cell(1, new_col_idx, new_cat)
-            ws_company.update_cell(2, new_col_idx, new_client)
-            return True, f"已建立新類別「{new_cat}」！"
-    except Exception as e:
-        return False, f"更新失敗: {e}"
-
-def smart_append_to_gsheet(data_dict):
-    for attempt in range(3):
-        try:
-            client = get_google_sheet_client()
-            sh = client.open_by_key(SPREADSHEET_KEY)
-            ws = sh.get_worksheet(0)
-            
-            all_values = ws.get_all_values()
-            headers = []
-            for row in all_values[:5]:
-                r_str = [str(r).strip() for r in row]
-                if "編號" in r_str and "日期" in r_str:
-                    headers = row
-                    break
-            if not headers: 
-                if all_values: headers = all_values[0]
-                else: return False
-
-            row_to_append = [""] * len(headers)
-            for col_name, value in data_dict.items():
-                try:
-                    idx = next(i for i, h in enumerate(headers) if str(h).strip() == col_name)
-                    row_to_append[idx] = value
-                except StopIteration: pass
-            
-            ws.append_row(row_to_append, value_input_option='USER_ENTERED')
-            return True
-        except Exception as e:
-            if "503" in str(e):
-                time.sleep(2)
-                continue
-            st.error(f"寫入失敗: {e}")
-            return False
-    return False
-
-def update_records_in_gsheet(edited_df):
-    for attempt in range(3):
-        try:
-            client = get_google_sheet_client()
-            sh = client.open_by_key(SPREADSHEET_KEY)
-            ws = sh.get_worksheet(0)
-            
-            all_values = ws.get_all_values()
-            headers = []
-            for i, row in enumerate(all_values[:5]):
-                r_str = [str(r).strip() for r in row]
-                if "編號" in r_str and "日期" in r_str:
-                    headers = row
-                    break
-            if not headers: return False
-            try: id_col_idx = headers.index("編號")
-            except: return False
-
-            all_col_values = ws.col_values(id_col_idx + 1)
-            
-            for index, row in edited_df.iterrows():
-                target_id = str(row['編號'])
-                try:
-                    row_in_list = all_col_values.index(target_id)
-                    actual_row_idx = row_in_list + 1
-                    row_data = []
-                    for h in headers:
-                        val = row.get(h, "")
-                        if isinstance(val, (pd.Timestamp, datetime)):
-                            val = val.strftime('%Y-%m-%d')
-                        if pd.isna(val): val = ""
-                        row_data.append(val)
-                    if str(all_col_values[row_in_list]) == target_id:
-                        ws.update(f"A{actual_row_idx}", [row_data], value_input_option='USER_ENTERED')
-                except ValueError: continue
-            return True
-        except Exception as e:
-            if "503" in str(e):
-                time.sleep(2)
-                continue
-            st.error(f"更新失敗: {e}")
-            return False
-    return False
-
-def get_yahoo_rate(target_currency, query_date, inverse=False):
-    ticker_symbol = f"{target_currency}TWD=X"
-    check_date = query_date
-    for _ in range(5):
-        try:
-            start_d = check_date.strftime("%Y-%m-%d")
-            end_d = (check_date + timedelta(days=1)).strftime("%Y-%m-%d")
-            df = yf.download(ticker_symbol, start=start_d, end=end_d, progress=False)
-            if not df.empty:
-                try: raw_rate = float(df['Close'].iloc[0])
-                except: raw_rate = float(df['Close'].values[0])
-                if inverse: return 1 / raw_rate, check_date, None
-                else: return raw_rate, check_date, None
-        except: pass
-        check_date -= timedelta(days=1)
-    return None, None, "無法取得匯率"
-
 def parse_taiwan_date(date_str):
     if pd.isna(date_str) or str(date_str).strip() == "": return pd.NaT
     s = str(date_str).split(',')[0].strip().replace(".", "/")
@@ -206,6 +95,7 @@ def load_data_from_gsheet():
             client = get_google_sheet_client()
             sh = client.open_by_key(SPREADSHEET_KEY)
             
+            # 讀取公司名單
             try:
                 ws_c = sh.get_worksheet(1)
                 if ws_c:
@@ -214,51 +104,198 @@ def load_data_from_gsheet():
                         headers = clean_headers(data[0])
                         df = pd.DataFrame(data[1:], columns=headers)
                         df = df.replace(r'^\s*$', pd.NA, regex=True).dropna(how='all')
+                        # 轉為字典 {Category: [Client1, Client2...]}
                         cd = {col: [str(x).strip() for x in df[col].values if pd.notna(x) and str(x).strip()] for col in df.columns}
                     else: cd = {}
                 else: cd = {}
             except: cd = {}
 
+            # 讀取業務紀錄
             try:
                 ws_f = sh.get_worksheet(0)
                 if ws_f:
                     all_values = ws_f.get_all_values()
                     header_idx = -1
-                    for i, row in enumerate(all_values[:5]):
+                    # 尋找標題列
+                    for i, row in enumerate(all_values[:10]):
                         r_str = [str(r).strip() for r in row]
                         if "編號" in r_str and "日期" in r_str:
                             header_idx = i
                             break
+                    
                     if header_idx != -1 and len(all_values) > header_idx + 1:
                         headers = clean_headers(all_values[header_idx])
                         df_b = pd.DataFrame(all_values[header_idx+1:], columns=headers)
+                        # 過濾掉沒有編號的空行
                         if '編號' in df_b.columns:
                             df_b = df_b[pd.to_numeric(df_b['編號'], errors='coerce').notna()]
                         else: df_b = pd.DataFrame()
                     else: df_b = pd.DataFrame()
                 else: df_b = pd.DataFrame()
             except: df_b = pd.DataFrame()
+            
             return cd, df_b
         except Exception as e:
-            if "503" in str(e):
-                time.sleep(2)
-                continue
-            st.error(f"連線失敗: {e}")
+            if "503" in str(e): time.sleep(2); continue
             return {}, pd.DataFrame()
     return {}, pd.DataFrame()
 
-def calculate_next_id_for_year(df_all, target_year):
-    if df_all.empty: return 1
-    if '編號' not in df_all.columns or '日期' not in df_all.columns: return 1
-    df_temp = df_all[['編號', '日期']].copy()
-    df_temp['parsed_date'] = df_temp['日期'].apply(parse_taiwan_date)
-    df_year = df_temp[df_temp['parsed_date'].dt.year == target_year]
-    if df_year.empty: return 1
+# ==========================================
+# 🛠️ 資料處理邏輯 (包含功能 2: 類別移動)
+# ==========================================
+
+def update_company_category_in_sheet(client_name, new_category):
+    """
+    功能 2 核心：檢查客戶是否已存在，若存在但類別不同，則移動之。
+    若不存在，則新增。
+    """
     try:
-        ids = pd.to_numeric(df_year['編號'], errors='coerce').dropna()
+        client = get_google_sheet_client()
+        sh = client.open_by_key(SPREADSHEET_KEY)
+        ws = sh.get_worksheet(1) # 假設公司名單在第二個分頁
+        
+        # 取得目前所有資料
+        all_cols = ws.get_all_values()
+        if not all_cols: return False, "讀取失敗"
+        
+        headers = [h.strip() for h in all_cols[0]]
+        
+        # 1. 尋找新類別所在的欄位 Index (如果沒有就新增欄)
+        if new_category in headers:
+            new_col_idx = headers.index(new_category) + 1
+        else:
+            new_col_idx = len(headers) + 1
+            ws.update_cell(1, new_col_idx, new_category)
+            headers.append(new_category)
+
+        # 2. 檢查該客戶是否已經存在於某個欄位中
+        found_row, found_col = None, None
+        existing_category = None
+        
+        # 遍歷尋找 (為了精確比對，不使用 API find，改用本地遍歷)
+        for c_idx, col_name in enumerate(headers):
+            # 取得該欄所有值
+            col_vals = [row[c_idx] for row in all_cols if len(row) > c_idx]
+            if client_name in col_vals:
+                r_idx = col_vals.index(client_name)
+                # Google Sheet index 從 1 開始
+                found_row = r_idx + 1 
+                found_col = c_idx + 1
+                existing_category = col_name
+                break
+        
+        # 3. 邏輯判斷
+        if found_row and found_col:
+            # 客戶已存在
+            if existing_category == new_category:
+                return True, "客戶類別未變動"
+            else:
+                # 客戶存在但類別不同 -> 移動 (先刪舊的，再加新的)
+                ws.update_cell(found_row, found_col, "") # 清空舊位置
+                # 找到新欄位的第一個空位
+                new_col_values = ws.col_values(new_col_idx)
+                next_row = len(new_col_values) + 1
+                # 如果原本位置只是變成空字串，可能中間會有洞，但這裡簡化處理直接 append 到新欄位
+                ws.update_cell(next_row, new_col_idx, client_name)
+                return True, f"已將客戶從「{existing_category}」移動至「{new_category}」"
+        else:
+            # 客戶不存在 -> 新增
+            new_col_values = ws.col_values(new_col_idx)
+            next_row = len(new_col_values) + 1
+            ws.update_cell(next_row, new_col_idx, client_name)
+            return True, f"已新增客戶至「{new_category}」"
+
+    except Exception as e:
+        return False, f"更新公司名單失敗: {e}"
+
+def smart_save_record(data_dict, is_update=False):
+    """
+    統一處理新增與更新 (功能 3 支援)
+    """
+    for attempt in range(3):
+        try:
+            client = get_google_sheet_client()
+            sh = client.open_by_key(SPREADSHEET_KEY)
+            ws = sh.get_worksheet(0)
+            
+            all_values = ws.get_all_values()
+            headers = []
+            header_row_idx = 0
+            
+            # 找標題
+            for i, row in enumerate(all_values[:10]):
+                r_str = [str(r).strip() for r in row]
+                if "編號" in r_str and "日期" in r_str:
+                    headers = row
+                    header_row_idx = i
+                    break
+            if not headers: return False, "找不到標題列"
+
+            # 準備要寫入的資料 list
+            row_to_write = [""] * len(headers)
+            for col_name, value in data_dict.items():
+                try:
+                    idx = next(i for i, h in enumerate(headers) if str(h).strip() == col_name)
+                    row_to_write[idx] = str(value)
+                except StopIteration: pass
+
+            target_id = str(data_dict.get("編號"))
+
+            if is_update:
+                # 更新模式：尋找 ID 所在的列
+                try:
+                    id_col_idx = headers.index("編號")
+                    id_list = ws.col_values(id_col_idx + 1)
+                    # 尋找 ID (跳過標題前)
+                    try:
+                        row_index = id_list.index(target_id) + 1
+                        # 更新整列
+                        # 取得該列原本資料，避免沒填的欄位被清空 (Optional, 視需求)
+                        # 這裡直接覆蓋
+                        ws.update(f"A{row_index}", [row_to_write], value_input_option='USER_ENTERED')
+                        return True, f"編號 {target_id} 更新成功"
+                    except ValueError:
+                        return False, "找不到原始編號，無法更新"
+                except Exception as ex:
+                    return False, str(ex)
+            else:
+                # 新增模式：直接 Append
+                ws.append_row(row_to_write, value_input_option='USER_ENTERED')
+                return True, f"編號 {target_id} 新增成功"
+
+        except Exception as e:
+            if "503" in str(e): time.sleep(2); continue
+            return False, f"寫入失敗: {e}"
+    return False, "連線逾時"
+
+def calculate_next_id(df_all, target_year):
+    if df_all.empty: return 1
+    if '編號' not in df_all.columns: return 1
+    # 簡單邏輯：取最大值+1 (不分年份，若要分年份需先濾)
+    # 這裡假設編號是連續整數
+    try:
+        ids = pd.to_numeric(df_all['編號'], errors='coerce').dropna()
         if ids.empty: return 1
         return int(ids.max()) + 1
     except: return 1
+
+def get_yahoo_rate(target_currency, query_date, inverse=False):
+    # 簡易實作，避免 yfinance 報錯影響主程式
+    try:
+        ticker_symbol = f"{target_currency}TWD=X"
+        check_date = query_date
+        for _ in range(5):
+            start_d = check_date.strftime("%Y-%m-%d")
+            end_d = (check_date + timedelta(days=1)).strftime("%Y-%m-%d")
+            df = yf.download(ticker_symbol, start=start_d, end=end_d, progress=False)
+            if not df.empty:
+                try: raw_rate = float(df['Close'].iloc[0])
+                except: raw_rate = float(df['Close'].values[0])
+                if inverse: return 1 / raw_rate, check_date, None
+                else: return raw_rate, check_date, None
+            check_date -= timedelta(days=1)
+    except: pass
+    return None, None, "無法取得匯率"
 
 # ==========================================
 # 🚀 主程式
@@ -266,201 +303,280 @@ def calculate_next_id_for_year(df_all, target_year):
 def main():
     st.set_page_config(page_title="雲端業務系統", layout="wide", page_icon="☁️")
     
+    # 側邊選單邏輯 (使用 callback 切換頁面)
     with st.sidebar:
         st.title("功能選單")
-        menu = st.radio("請選擇", ["📝 新增業務登記", "📊 數據戰情室"], index=0)
+        
+        # 使用按鈕來切換頁面，這樣可以程式化控制
+        if st.button("📝 新增業務登記", use_container_width=True):
+            st.session_state['current_page'] = "📝 新增業務登記"
+            st.session_state['edit_mode'] = False # 切換回新增模式
+            st.session_state['edit_data'] = {}
+            st.session_state['inv_list'] = []
+            st.session_state['pay_list'] = []
+            st.rerun()
+            
+        if st.button("📊 數據戰情室", use_container_width=True):
+            st.session_state['current_page'] = "📊 數據戰情室"
+            st.session_state['edit_mode'] = False
+            st.rerun()
+            
         st.markdown("---")
         if st.button("🔄 強制重新整理"):
             st.cache_data.clear()
             st.rerun()
 
+    # 載入資料
     with st.spinner("資料載入中..."):
         company_dict, df_business = load_data_from_gsheet()
 
-    if menu == "📝 新增業務登記":
-        if 'ex_res' not in st.session_state: st.session_state['ex_res'] = ""
-        if 'inv_list' not in st.session_state: st.session_state['inv_list'] = []
-        if 'pay_list' not in st.session_state: st.session_state['pay_list'] = []
+    # 準備搜尋用的清單 (功能 1)
+    # 格式： "台積電 (半導體)"
+    search_list = []
+    client_to_cat_map = {}
+    for cat, clients in company_dict.items():
+        for client in clients:
+            label = f"{client} ({cat})"
+            search_list.append(label)
+            client_to_cat_map[label] = (cat, client)
+    
+    # ========================================================
+    # 頁面 1: 業務登記 (包含新增與編輯模式)
+    # ========================================================
+    if st.session_state['current_page'] == "📝 新增業務登記":
+        
+        # 判斷是否為編輯模式
+        is_edit = st.session_state.get('edit_mode', False)
+        edit_data = st.session_state.get('edit_data', {})
+        
+        form_title = f"📝 編輯紀錄 (No.{edit_data.get('編號')})" if is_edit else "📝 新增業務登記"
+        st.subheader(form_title)
+        
+        if is_edit:
+            st.info("💡 目前為編輯模式。修改完畢請按下方「更新資料」按鈕。")
 
+        # 初始化表單預設值
+        def_date = datetime.today()
+        def_cat_idx = 0
+        def_client_idx = 0
+        def_project = ""
+        def_price = 0
+        def_remark = ""
+        def_ex_res = st.session_state.get('ex_res', "")
+        
+        # 若為編輯模式，填入舊資料
+        if is_edit and edit_data:
+            try:
+                if edit_data.get('日期'):
+                    def_date = parse_taiwan_date(edit_data['日期'])
+                    if pd.isna(def_date): def_date = datetime.today()
+                
+                # 設定客戶類別與名稱
+                e_cat = edit_data.get('客戶類別', "")
+                e_client = edit_data.get('客戶名稱', "")
+                
+                # 初始化列表 (如果還沒被使用者改動過)
+                if not st.session_state.get('inv_list') and edit_data.get('發票日期'):
+                    dates = str(edit_data['發票日期']).split(',')
+                    st.session_state['inv_list'] = [parse_taiwan_date(d) for d in dates if parse_taiwan_date(d) is not pd.NaT]
+                
+                if not st.session_state.get('pay_list') and edit_data.get('收款日期'):
+                    dates = str(edit_data['收款日期']).split(',')
+                    st.session_state['pay_list'] = [parse_taiwan_date(d) for d in dates if parse_taiwan_date(d) is not pd.NaT]
+                
+                def_project = edit_data.get('案號', "")
+                # 處理價格
+                p_val = str(edit_data.get('完稅價格', "0")).replace(",", "")
+                def_price = int(float(p_val)) if p_val and p_val.replace(".","").isdigit() else 0
+                def_remark = edit_data.get('備註', "")
+                def_ex_res = edit_data.get('進出口匯率', "")
+                
+            except Exception as e:
+                st.error(f"載入編輯資料錯誤: {e}")
+
+        # --- 表單 UI 開始 ---
         with st.container(border=True):
             st.markdown("### 🏢 客戶與基本資料")
-            search_col, _ = st.columns([3, 1])
-            with search_col:
-                search_keyword = st.text_input("🔍 快速搜尋 (輸入後按 Enter)", placeholder="例如：台積")
             
+            # --- 功能 1: 快速搜尋 (Autocomplete) ---
+            # 如果是編輯模式，預設搜尋框為空或鎖定，這裡我們讓搜尋框可以覆蓋當前選擇
+            col_search, _ = st.columns([3, 1])
+            with col_search:
+                # 使用 selectbox 達成搜尋與點選
+                # 插入一個空選項以便預設不選
+                options = ["🔍 請輸入關鍵字搜尋..."] + search_list
+                selected_search = st.selectbox("快速搜尋客戶", options, index=0)
+            
+            # 判斷使用者是否透過搜尋選取了
             found_cat, found_client = None, None
-            default_cat_index, default_client_index = 0, 0
+            if selected_search != "🔍 請輸入關鍵字搜尋...":
+                found_cat, found_client = client_to_cat_map.get(selected_search, (None, None))
+
+            # 決定最終顯示在下方的類別與客戶
+            # 優先順序: 搜尋結果 > 編輯模式舊資料 > 預設
             
-            if search_keyword:
-                for cat, clients in company_dict.items():
-                    for client in clients:
-                        if search_keyword in client:
-                            found_cat, found_client = cat, client
-                            break
-                    if found_cat: break
-                if found_client: st.success(f"已找到：{found_client} ({found_cat})")
-                else: st.warning("找不到符合的客戶。")
+            current_cat_opts = list(company_dict.keys()) + ["➕ 新增類別..."]
+            
+            # 計算 Selectbox 的 index
+            target_cat = found_cat if found_cat else (edit_data.get('客戶類別') if is_edit else None)
+            try:
+                if target_cat in current_cat_opts:
+                    def_cat_idx = current_cat_opts.index(target_cat)
+            except: pass
 
             st.markdown("---")
             c1, c2 = st.columns(2)
             with c1:
-                input_date = st.date_input("📅 填表日期", datetime.today())
-                target_year = input_date.year
-                next_id = calculate_next_id_for_year(df_business, target_year)
+                input_date = st.date_input("📅 填表日期", def_date)
                 
-                cat_options = list(company_dict.keys()) + ["➕ 新增類別..."]
-                if found_cat and found_cat in cat_options:
-                    default_cat_index = cat_options.index(found_cat)
-                selected_cat = st.selectbox("📂 客戶類別", cat_options, index=default_cat_index)
+                # 類別選擇
+                selected_cat = st.selectbox("📂 客戶類別", current_cat_opts, index=def_cat_idx, key="cat_box")
                 
+                # 處理新增類別輸入
                 if selected_cat == "➕ 新增類別...":
                     final_cat = st.text_input("✍️ 請輸入新類別名稱")
-                    client_options = ["➕ 新增客戶..."]
+                    client_opts = ["➕ 新增客戶..."]
                 else:
                     final_cat = selected_cat
-                    client_options = company_dict.get(selected_cat, []) + ["➕ 新增客戶..."]
+                    client_opts = company_dict.get(selected_cat, []) + ["➕ 新增客戶..."]
 
-                if found_client and found_client in client_options:
-                    default_client_index = client_options.index(found_client)
-                else: default_client_index = 0
+                # 計算客戶名稱的 index
+                target_client = found_client if found_client else (edit_data.get('客戶名稱') if is_edit else None)
+                try:
+                    if target_client in client_opts:
+                        def_client_idx = client_opts.index(target_client)
+                    else: def_client_idx = 0
+                except: def_client_idx = 0
                 
-                selected_client = st.selectbox("👤 客戶名稱", client_options, index=default_client_index)
+                # 客戶選擇 (如果剛剛換了類別，這裡 index 要小心，Streamlit refresh 後會重算)
+                # 為了避免 index error，若 client 不在新的 opts 裡，歸零
+                if def_client_idx >= len(client_opts): def_client_idx = 0
+                
+                selected_client = st.selectbox("👤 客戶名稱", client_opts, index=def_client_idx, key="client_box")
+                
                 if selected_client == "➕ 新增客戶...":
                     final_client = st.text_input("✍️ 請輸入新客戶名稱")
-                else: final_client = selected_client
+                else:
+                    final_client = selected_client
 
             with c2:
-                st.metric(label=f"✨ {target_year} 年度下一個編號", value=f"No. {next_id}", delta="Auto")
-                with st.expander("🕵️‍♂️ 編號診斷"):
-                    if not df_business.empty and '日期' in df_business.columns:
-                        debug_df = df_business.copy()
-                        debug_df['parsed_date'] = debug_df['日期'].apply(parse_taiwan_date)
-                        year_data = debug_df[debug_df['parsed_date'].dt.year == target_year]
-                        st.write(f"系統在資料庫找到 {len(year_data)} 筆 {target_year} 年的資料。")
-                        if not year_data.empty:
-                            st.dataframe(year_data[['編號', '日期', '客戶名稱']].head(), use_container_width=True)
-                    else: st.write("資料庫讀取中...")
+                # 若是編輯模式，顯示當前 ID；若是新增，顯示預測 ID
+                if is_edit:
+                    current_id = edit_data.get('編號')
+                    st.metric(label="✨ 編輯案件編號", value=f"No. {current_id}")
+                else:
+                    next_id = calculate_next_id(df_business, input_date.year)
+                    st.metric(label=f"✨ {input_date.year} 新案件編號", value=f"No. {next_id}", delta="Auto")
 
-                project_no = st.text_input("🔖 案號 / 產品名稱")
-                price = st.number_input("💰 完稅價格 (TWD)", min_value=0, step=1000, format="%d", value=0)
-                remark = st.text_area("📝 備註", height=100)
+                project_no = st.text_input("🔖 案號 / 產品名稱", value=def_project)
+                price = st.number_input("💰 完稅價格 (TWD)", min_value=0, step=1000, format="%d", value=def_price)
+                remark = st.text_area("📝 備註", height=100, value=def_remark)
 
+        # --- 財務與日期區塊 ---
         with st.container(border=True):
             st.markdown("### ⏰ 時程與財務設定")
+            
+            # 預定交期與出貨日期處理
+            d_del_def = None
+            d_ship_def = None
+            if is_edit:
+                d_del_def = parse_taiwan_date(edit_data.get('預定交期'))
+                d_ship_def = parse_taiwan_date(edit_data.get('出貨日期'))
+            
+            has_del_init = True if (d_del_def and not pd.isna(d_del_def)) else False
+            has_ship_init = True if (d_ship_def and not pd.isna(d_ship_def)) else False
+
             d1, d2, d3, d4 = st.columns(4)
             with d1: 
-                has_delivery = st.checkbox("已有預定交期?", value=False)
-                ex_del = st.date_input("🚚 預定交期", datetime.today()) if has_delivery else None
+                has_delivery = st.checkbox("已有預定交期?", value=has_del_init)
+                ex_del = st.date_input("🚚 預定交期", d_del_def if has_del_init else datetime.today()) if has_delivery else None
             with d2:
-                has_ship = st.checkbox("已有出貨日期?", value=False)
-                ship_d = st.date_input("🚚 出貨日期", datetime.today()) if has_ship else None
+                has_ship = st.checkbox("已有出貨日期?", value=has_ship_init)
+                ship_d = st.date_input("🚚 出貨日期", d_ship_def if has_ship_init else datetime.today()) if has_ship else None
+            
+            # 發票日期 (多選邏輯)
             with d3: 
-                has_inv = st.checkbox("已有發票日期?", value=False)
-                if has_inv:
-                    c_pick, c_add = st.columns([3, 1])
-                    with c_pick:
-                        new_inv_date = st.date_input("發票日期", datetime.today(), label_visibility="collapsed", key="pick_inv")
-                    with c_add:
-                        if st.button("➕", key="add_inv"):
-                            if new_inv_date not in st.session_state['inv_list']:
-                                st.session_state['inv_list'].append(new_inv_date)
-                                st.session_state['inv_list'].sort()
-                    # ⭐⭐ 修改點：如果暫存清單有東西，顯示清單；若無，顯示選擇的單日
-                    if st.session_state['inv_list']:
-                        date_strs = [d.strftime('%Y-%m-%d') for d in st.session_state['inv_list']]
-                        st.caption(f"已加入: {', '.join(date_strs)}")
-                        if st.button("🗑️", key="clr_inv"):
-                            st.session_state['inv_list'] = []
-                            st.rerun()
-                    else:
-                        st.caption(f"目前選擇: {new_inv_date.strftime('%Y-%m-%d')}")
+                st.markdown("🧾 **發票日期**")
+                c_pick, c_add = st.columns([3, 1])
+                with c_pick: new_inv_date = st.date_input("選日期", datetime.today(), key="pick_inv", label_visibility="collapsed")
+                with c_add:
+                    if st.button("➕", key="add_inv"):
+                        if new_inv_date not in st.session_state['inv_list']:
+                            st.session_state['inv_list'].append(new_inv_date)
+                            st.session_state['inv_list'].sort()
+                
+                # 顯示列表
+                if st.session_state['inv_list']:
+                    st.caption("已加入:")
+                    for d in st.session_state['inv_list']:
+                        st.text(f"- {d.strftime('%Y-%m-%d')}")
+                    if st.button("清空", key="clr_inv"):
+                        st.session_state['inv_list'] = []
+                        st.rerun()
 
-                else:
-                    if st.session_state['inv_list']: st.session_state['inv_list'] = []
-
+            # 收款日期 (多選邏輯)
             with d4:
-                has_pay = st.checkbox("已有收款日期?", value=False)
-                if has_pay:
-                    c_pick_p, c_add_p = st.columns([3, 1])
-                    with c_pick_p:
-                        new_pay_date = st.date_input("收款日期", datetime.today(), label_visibility="collapsed", key="pick_pay")
-                    with c_add_p:
-                        if st.button("➕", key="add_pay"):
-                            if new_pay_date not in st.session_state['pay_list']:
-                                st.session_state['pay_list'].append(new_pay_date)
-                                st.session_state['pay_list'].sort()
-                    # ⭐⭐ 修改點：同上
-                    if st.session_state['pay_list']:
-                        date_strs_p = [d.strftime('%Y-%m-%d') for d in st.session_state['pay_list']]
-                        st.caption(f"已加入: {', '.join(date_strs_p)}")
-                        if st.button("🗑️", key="clr_pay"):
-                            st.session_state['pay_list'] = []
-                            st.rerun()
-                    else:
-                         st.caption(f"目前選擇: {new_pay_date.strftime('%Y-%m-%d')}")
-                else:
-                    if st.session_state['pay_list']: st.session_state['pay_list'] = []
+                st.markdown("💰 **收款日期**")
+                c_pick_p, c_add_p = st.columns([3, 1])
+                with c_pick_p: new_pay_date = st.date_input("選日期", datetime.today(), key="pick_pay", label_visibility="collapsed")
+                with c_add_p:
+                    if st.button("➕", key="add_pay"):
+                        if new_pay_date not in st.session_state['pay_list']:
+                            st.session_state['pay_list'].append(new_pay_date)
+                            st.session_state['pay_list'].sort()
+                
+                if st.session_state['pay_list']:
+                    st.caption("已加入:")
+                    for d in st.session_state['pay_list']:
+                        st.text(f"- {d.strftime('%Y-%m-%d')}")
+                    if st.button("清空", key="clr_pay"):
+                        st.session_state['pay_list'] = []
+                        st.rerun()
             
             st.divider()
-            st.markdown("#### 💱 進出口匯率")
+            # 匯率區塊
             col_ex_input, col_ex_btn = st.columns([3, 1])
             with col_ex_input:
-                final_ex = st.text_input("匯率內容", value=st.session_state['ex_res'], label_visibility="collapsed", placeholder="匯率將顯示於此")
-            
-            with st.expander("🔍 點此開啟：匯率查詢小工具"):
-                e1, e2, e3, e4 = st.columns([2, 2, 2, 2])
+                final_ex = st.text_input("匯率內容", value=def_ex_res, placeholder="匯率將顯示於此")
+
+            with st.expander("🔍 匯率查詢小工具"):
+                e1, e2, e3, e4 = st.columns(4)
                 with e1: q_date = st.date_input("查詢日期", datetime.today())
                 with e2: q_curr = st.selectbox("外幣", ["USD", "EUR", "JPY", "CNY", "GBP"])
                 with e3: is_inverse = st.checkbox("反轉 (台幣基準)", value=False)
                 with e4:
-                    st.write("")
-                    if st.button("🚀 立即查詢"):
-                        with st.spinner("連線中..."):
-                            rate_val, found_d, err_msg = get_yahoo_rate(q_curr, q_date, is_inverse)
-                            if rate_val:
-                                d_str = found_d.strftime('%Y/%m/%d')
-                                if is_inverse: desc = f"{d_str} 1 TWD = {rate_val:.5f} {q_curr}"
-                                else: desc = f"{d_str} 1 {q_curr} = {rate_val:.3f} TWD"
-                                st.session_state['ex_res'] = desc
-                                st.success("已填入！")
-                                time.sleep(0.5)
-                                st.rerun()
-                            else: st.error(f"失敗：{err_msg}")
+                    if st.button("🚀 查詢"):
+                        r, d, m = get_yahoo_rate(q_curr, q_date, is_inverse)
+                        if r:
+                            desc = f"{d.strftime('%Y/%m/%d')} 1 {q_curr} = {r:.3f} TWD"
+                            if is_inverse: desc = f"{d.strftime('%Y/%m/%d')} 1 TWD = {r:.5f} {q_curr}"
+                            # 寫入 session 並 rerun 更新 input value
+                            st.session_state['ex_res'] = desc
+                            st.rerun()
+                        else: st.error("查無資料")
 
         st.write("")
         col_sub1, col_sub2, col_sub3 = st.columns([1, 2, 1])
         with col_sub2:
-            submit = st.button("💾 確認並上傳到雲端", type="primary", use_container_width=True)
+            btn_label = "💾 更新資料" if is_edit else "💾 確認並上傳到雲端"
+            submit = st.button(btn_label, type="primary", use_container_width=True)
 
         if submit:
             if not final_client:
                 st.toast("❌ 資料不完整：請確認客戶名稱", icon="🚨")
             else:
+                # 準備資料
                 ds_str = input_date.strftime("%Y-%m-%d")
                 eds_str = ex_del.strftime("%Y-%m-%d") if has_delivery and ex_del else ""
                 ship_str = ship_d.strftime("%Y-%m-%d") if has_ship and ship_d else ""
                 
-                # ⭐⭐ 關鍵邏輯修正：智慧判斷日期 ⭐⭐
-                # 發票日期：如果有清單，用清單；如果清單空但有勾選，用目前選的日期
-                if has_inv:
-                    if st.session_state['inv_list']:
-                        ids_str = ", ".join([d.strftime('%Y-%m-%d') for d in st.session_state['inv_list']])
-                    else:
-                        ids_str = new_inv_date.strftime('%Y-%m-%d')
-                else:
-                    ids_str = ""
-                    
-                # 收款日期：同上
-                if has_pay:
-                    if st.session_state['pay_list']:
-                        pds_str = ", ".join([d.strftime('%Y-%m-%d') for d in st.session_state['pay_list']])
-                    else:
-                        pds_str = new_pay_date.strftime('%Y-%m-%d')
-                else:
-                    pds_str = ""
+                ids_str = ", ".join([d.strftime('%Y-%m-%d') for d in st.session_state['inv_list']])
+                pds_str = ", ".join([d.strftime('%Y-%m-%d') for d in st.session_state['pay_list']])
+
+                save_id = edit_data.get('編號') if is_edit else next_id
 
                 data_to_save = {
-                    "編號": next_id,
+                    "編號": save_id,
                     "日期": ds_str,
                     "客戶類別": final_cat,
                     "客戶名稱": final_client,
@@ -471,117 +587,114 @@ def main():
                     "發票日期": ids_str,
                     "收款日期": pds_str,
                     "進出口匯率": final_ex,
-                    "備註": remark,
-                    "階段性款項": "" 
+                    "備註": remark
                 }
                 
-                if smart_append_to_gsheet(data_to_save):
-                    update_msg = ""
-                    if selected_cat == "➕ 新增類別..." or selected_client == "➕ 新增客戶...":
-                        success, msg = save_new_company_to_sheet(final_cat, final_client)
-                        if success: update_msg = f" | {msg}"
+                with st.spinner("資料儲存處理中..."):
+                    # 1. 儲存/更新 業務紀錄
+                    success, msg = smart_save_record(data_to_save, is_update=is_edit)
+                    
+                    if success:
+                        msg_list = [msg]
+                        # 2. 功能 2: 自動調整公司類別
+                        # 不論新增或修改，都檢查一下公司名單狀態
+                        if final_client:
+                            c_success, c_msg = update_company_category_in_sheet(final_client, final_cat)
+                            if c_success: msg_list.append(c_msg)
+                        
+                        st.balloons()
+                        st.success(" | ".join(msg_list))
+                        
+                        # 清空狀態
+                        st.session_state['ex_res'] = ""
+                        st.session_state['inv_list'] = []
+                        st.session_state['pay_list'] = []
+                        st.session_state['edit_mode'] = False
+                        st.session_state['edit_data'] = {}
+                        
+                        st.cache_data.clear()
+                        time.sleep(2)
+                        st.rerun()
+                    else:
+                        st.error(f"儲存失敗: {msg}")
 
-                    st.balloons()
-                    st.success(f"✅ 成功建立案件：No.{next_id}{update_msg}")
-                    st.session_state['ex_res'] = ""
-                    st.session_state['inv_list'] = []
-                    st.session_state['pay_list'] = []
-                    st.cache_data.clear()
-                    time.sleep(3)
-                    st.rerun()
-
-    elif menu == "📊 數據戰情室":
+    # ========================================================
+    # 頁面 2: 數據戰情室 (包含功能 3: 點選跳轉編輯)
+    # ========================================================
+    elif st.session_state['current_page'] == "📊 數據戰情室":
         st.title("📊 數據戰情室")
         
         if df_business.empty:
             st.info("目前尚無資料。")
         else:
-            try:
-                df_clean = df_business.copy()
+            # 資料清洗
+            df_clean = df_business.copy()
+            
+            # 處理金額欄位
+            price_col = next((c for c in df_clean.columns if '價格' in c or '金額' in c), None)
+            if price_col:
+                df_clean[price_col] = df_clean[price_col].astype(str).str.replace(',', '').replace('', '0')
+                df_clean[price_col] = pd.to_numeric(df_clean[price_col], errors='coerce').fillna(0)
+            
+            # 處理日期欄位
+            date_col = next((c for c in df_clean.columns if '日期' in c), None)
+            if date_col:
+                df_clean['parsed_date'] = df_clean[date_col].apply(parse_taiwan_date)
+                df_valid = df_clean.dropna(subset=['parsed_date']).copy()
+                df_valid['Year'] = df_valid['parsed_date'].dt.year
                 
-                price_col = next((c for c in df_clean.columns if '價格' in c or '金額' in c), None)
-                if price_col:
-                    df_clean[price_col] = df_clean[price_col].astype(str).str.replace(',', '').replace('', '0')
-                    df_clean[price_col] = pd.to_numeric(df_clean[price_col], errors='coerce').fillna(0)
+                all_years = sorted(df_valid['Year'].unique().astype(int), reverse=True)
+                selected_year = st.selectbox("📅 請選擇年份", all_years)
                 
-                date_col = next((c for c in df_clean.columns if '日期' in c), None)
-                if date_col:
-                    potential_date_cols = ['日期', '預定交期', '出貨日期'] 
-                    for col in potential_date_cols:
-                        if col in df_clean.columns:
-                            df_clean[col] = df_clean[col].apply(parse_taiwan_date)
-                    
-                    df_valid = df_clean.dropna(subset=[date_col]).copy()
-                    
-                    if not df_valid.empty:
-                        df_valid['Year'] = df_valid[date_col].dt.year
-                        all_years = sorted(df_valid['Year'].unique().astype(int), reverse=True)
-                        selected_year = st.selectbox("📅 請選擇年份", all_years)
-                        df_final = df_valid[df_valid['Year'] == selected_year]
-                        
-                        st.markdown(f"### 📊 {selected_year} 年度總覽")
-                        total_rev = df_final[price_col].sum()
-                        total_count = len(df_final)
-                        k1, k2, k3 = st.columns(3)
-                        k1.metric("總營業額", f"${total_rev:,.0f}")
-                        k2.metric("總案件數", f"{total_count} 件")
-                        if total_count > 0: k3.metric("平均客單價", f"${total_rev/total_count:,.0f}")
-                        st.divider()
+                df_final = df_valid[df_valid['Year'] == selected_year].sort_values(by='parsed_date', ascending=False)
+                
+                # --- KPI ---
+                total_rev = df_final[price_col].sum() if price_col else 0
+                st.markdown(f"### 📊 {selected_year} 年度總覽")
+                k1, k2, k3 = st.columns(3)
+                k1.metric("總營業額", f"${total_rev:,.0f}")
+                k2.metric("總案件數", f"{len(df_final)} 件")
+                avg = total_rev/len(df_final) if len(df_final) > 0 else 0
+                k3.metric("平均客單價", f"${avg:,.0f}")
+                st.divider()
 
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            st.subheader("📈 客戶類別佔比")
-                            cat_col = next((c for c in df_final.columns if '類別' in c), None)
-                            if cat_col:
-                                fig_pie = px.pie(df_final, names=cat_col, values=price_col, hole=0.4)
-                                st.plotly_chart(fig_pie, use_container_width=True)
-                        with c2:
-                            st.subheader("📅 每月業績趨勢")
-                            df_monthly = df_final.resample('M', on=date_col)[price_col].sum().reset_index()
-                            if not df_monthly.empty:
-                                df_monthly['Month_Str'] = df_monthly[date_col].dt.strftime('%Y-%m')
-                                fig_bar = px.bar(df_monthly, x='Month_Str', y=price_col, 
-                                                 title="月營收分佈", labels={'Month_Str':'月份', price_col:'金額'})
-                                st.plotly_chart(fig_bar, use_container_width=True)
+                # --- 功能 3: 點選編輯 ---
+                st.subheader(f"📝 {selected_year} 詳細資料 (點選列可編輯)")
+                st.info("💡 提示：**點選** 表格中的某一列，即可跳轉至編輯頁面修改資料。")
 
-                        st.markdown("---")
-                        st.subheader(f"📝 編輯 {selected_year} 年度資料")
-                        st.info("💡 提示：直接點擊欄位即可修改，修改完請按下方「儲存變更」按鈕。")
-                        
-                        display_cols = [c for c in df_final.columns if c not in ['Year', 'converted_date']]
-                        
-                        edited_df = st.data_editor(
-                            df_final[display_cols],
-                            key="data_editor",
-                            num_rows="dynamic",
-                            use_container_width=True,
-                            column_config={
-                                "編號": st.column_config.NumberColumn("編號 (鎖定)", disabled=True, format="%d"),
-                                "完稅價格": st.column_config.NumberColumn("完稅價格", format="$%d"),
-                                "日期": st.column_config.DateColumn("日期", format="YYYY-MM-DD"),
-                                "預定交期": st.column_config.DateColumn("預定交期", format="YYYY-MM-DD"),
-                                "出貨日期": st.column_config.DateColumn("出貨日期", format="YYYY-MM-DD"),
-                                "收款日期": st.column_config.TextColumn("收款日期 (可多筆)"),
-                                "發票日期": st.column_config.TextColumn("發票日期 (可多筆)"),
-                            }
-                        )
-                        
-                        if st.button("💾 儲存變更", type="primary"):
-                            with st.spinner("正在更新雲端資料庫..."):
-                                if update_records_in_gsheet(edited_df):
-                                    st.success("✅ 更新成功！")
-                                    st.cache_data.clear()
-                                    time.sleep(1)
-                                    st.rerun()
-                                else:
-                                    st.error("更新失敗。")
-                    else:
-                        st.warning("日期解析後無資料。")
-                else:
-                    st.error("找不到日期欄位。")
-            except Exception as e:
-                st.error(f"錯誤: {e}")
-                st.dataframe(df_business)
+                # 設定表格顯示
+                display_cols = [c for c in df_final.columns if c not in ['Year', 'parsed_date']]
+                
+                # 使用 Streamlit 的 on_select 事件
+                selection = st.dataframe(
+                    df_final[display_cols],
+                    use_container_width=True,
+                    on_select="rerun",  # 當選擇變更時重新執行
+                    selection_mode="single-row", # 單行選取
+                    hide_index=True
+                )
+
+                # 處理選取事件
+                if selection and selection["selection"]["rows"]:
+                    selected_index = selection["selection"]["rows"][0]
+                    # 取得原始資料 (因為 df_final 可能被排序過，需小心 index)
+                    selected_row = df_final.iloc[selected_index]
+                    
+                    # 轉為 dict
+                    row_dict = selected_row.to_dict()
+                    # 轉換 Timestamp 為字串以免報錯
+                    for k, v in row_dict.items():
+                        if isinstance(v, (pd.Timestamp, datetime)):
+                            row_dict[k] = v.strftime('%Y-%m-%d')
+                    
+                    # 寫入 Session 並跳轉
+                    st.session_state['edit_mode'] = True
+                    st.session_state['edit_data'] = row_dict
+                    st.session_state['current_page'] = "📝 新增業務登記"
+                    st.rerun()
+
+            else:
+                st.error("資料表中找不到日期欄位，無法分析。")
 
 if __name__ == "__main__":
     main()
