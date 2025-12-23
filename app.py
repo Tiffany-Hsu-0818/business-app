@@ -353,7 +353,6 @@ def main():
                         if norm_key in normalize_text(client):
                             matches.append(f"{client} ({cat})")
                 
-                # 處理搜尋結果
                 target_str = None
                 if len(matches) == 0:
                     st.warning("❌ 找不到符合的客戶，請直接於下方填寫。")
@@ -373,7 +372,6 @@ def main():
                         found_client = target_str[:split_idx]
                         found_cat = target_str[split_idx+2:-1]
                         
-                        # ⭐ 關鍵修正：檢查 Session State 是否與搜尋結果一致，若不一致則強制覆寫並 Rerun
                         need_rerun = False
                         if found_cat and st.session_state.get('cat_box') != found_cat:
                             st.session_state['cat_box'] = found_cat
@@ -397,7 +395,7 @@ def main():
                 # 類別清單
                 current_cat_opts = list(company_dict.keys()) + ["➕ 新增類別..."]
                 
-                # 若無搜尋結果，嘗試使用編輯資料或預設
+                # 若無搜尋結果，嘗試使用編輯資料
                 if not found_cat:
                     target_cat = edit_data.get('客戶類別') if is_edit else None
                     if target_cat in current_cat_opts:
@@ -406,7 +404,6 @@ def main():
                             def_cat_idx = current_cat_opts.index(target_cat)
                         except: pass
                 
-                # 類別 Dropdown (key="cat_box")
                 selected_cat = st.selectbox("📂 客戶類別", current_cat_opts, key="cat_box")
                 
                 if selected_cat == "➕ 新增類別...":
@@ -416,7 +413,6 @@ def main():
                     final_cat = selected_cat
                     client_opts = company_dict.get(selected_cat, []) + ["➕ 新增客戶..."]
 
-                # 客戶 Dropdown (key="client_box")
                 selected_client = st.selectbox("👤 客戶名稱", client_opts, key="client_box")
                 
                 if selected_client == "➕ 新增客戶...":
@@ -596,6 +592,7 @@ def main():
                 
                 df_final = df_valid[df_valid['Year'] == selected_year].sort_values(by='parsed_date', ascending=False)
                 
+                # --- KPI ---
                 total_rev = df_final[price_col].sum() if price_col else 0
                 st.markdown(f"### 📊 {selected_year} 年度總覽")
                 k1, k2, k3 = st.columns(3)
@@ -603,8 +600,42 @@ def main():
                 k2.metric("總案件數", f"{len(df_final)} 件")
                 avg = total_rev/len(df_final) if len(df_final) > 0 else 0
                 k3.metric("平均客單價", f"${avg:,.0f}")
-                st.divider()
+                
+                # --- 圖表區 (已加回) ---
+                st.markdown("---")
+                c_chart1, c_chart2 = st.columns(2)
+                
+                # 圓餅圖
+                with c_chart1:
+                    st.subheader("📈 客戶類別佔比")
+                    cat_col = next((c for c in df_final.columns if '類別' in c), None)
+                    if cat_col and price_col:
+                        fig_pie = px.pie(df_final, names=cat_col, values=price_col, hole=0.4)
+                        st.plotly_chart(fig_pie, use_container_width=True)
+                    else:
+                        st.info("無法識別類別欄位，無法繪製圓餅圖")
 
+                # 長條圖
+                with c_chart2:
+                    st.subheader("📅 每月業績趨勢")
+                    if price_col and 'parsed_date' in df_final.columns:
+                        # 依月份分組統計
+                        # 使用 M 代表月底 (Month End)，避免未來版本警告
+                        df_monthly = df_final.resample('M', on='parsed_date')[price_col].sum().reset_index()
+                        df_monthly['Month_Str'] = df_monthly['parsed_date'].dt.strftime('%Y-%m')
+                        
+                        fig_bar = px.bar(
+                            df_monthly, 
+                            x='Month_Str', 
+                            y=price_col, 
+                            title="月營收分佈", 
+                            labels={'Month_Str':'月份', price_col:'金額'}
+                        )
+                        st.plotly_chart(fig_bar, use_container_width=True)
+                
+                st.markdown("---")
+
+                # --- 詳細資料列表 (點選編輯功能) ---
                 st.subheader(f"📝 {selected_year} 詳細資料 (點選列可編輯)")
                 st.info("💡 提示：**點選** 表格中的某一列，即可跳轉至編輯頁面修改資料。")
 
