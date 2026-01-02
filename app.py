@@ -308,6 +308,12 @@ def main():
             st.session_state['edit_data'] = {}
             st.session_state['inv_list'] = []
             st.session_state['pay_list'] = []
+            
+            # --- FIX: 按下「新增」時，強制清除下拉選單的記憶，確保是乾淨的狀態 ---
+            if 'cat_box' in st.session_state: del st.session_state['cat_box']
+            if 'client_box' in st.session_state: del st.session_state['client_box']
+            # -------------------------------------------------------------
+            
             st.rerun()
             
         if st.button("📊 數據戰情室", use_container_width=True):
@@ -326,7 +332,6 @@ def main():
     # ==========================================
     # 🕵️ 抓鬼偵錯區 (整合版)
     # ==========================================
-    # 這裡會自動檢查有沒有 2026 年(或未來)的資料導致編號跳號
     debug_date_col = next((c for c in df_business.columns if '日期' in c and '發票' not in c), None)
     
     if debug_date_col and not df_business.empty:
@@ -334,14 +339,12 @@ def main():
         df_debug['解析後日期'] = df_debug[debug_date_col].apply(parse_taiwan_date)
         df_debug['判定年份'] = df_debug['解析後日期'].dt.year
         
-        # 抓出 2026 年以後的資料
         ghost_rows = df_debug[df_debug['判定年份'] >= 2026]
         
         if not ghost_rows.empty:
             with st.expander("⚠️ 系統偵測到 2026 年已有資料！(點擊展開查看)", expanded=True):
                 st.error(f"系統發現 {len(ghost_rows)} 筆資料被判定為 2026 年，因此編號無法從 1 開始。")
                 st.write("請根據下表的 `Thinking_Row_Index` (Excel 行號)，回到 Google Sheet 刪除或修改這些資料：")
-                # 顯示關鍵欄位供使用者對照
                 st.dataframe(ghost_rows[['Thinking_Row_Index', '編號', debug_date_col, '解析後日期', '客戶名稱']])
     # ==========================================
 
@@ -437,15 +440,13 @@ def main():
                 
                 current_cat_opts = list(company_dict.keys()) + ["➕ 新增類別..."]
                 
-                # --- FIX: 計算正確的 Index 讓 selectbox 正確預選 ---
-                cat_index = 0
-                if not found_cat and is_edit:
-                    target_cat = edit_data.get('客戶類別')
-                    if target_cat and target_cat in current_cat_opts:
-                        cat_index = current_cat_opts.index(target_cat)
-                # ------------------------------------------------
+                # --- FIX: 防呆檢查。如果 Session State 裡的類別（例如從編輯帶過來的）不在目前的選項裡，就清除它 ---
+                # --- 這樣可以防止 "Value not in options" 的錯誤
+                if 'cat_box' in st.session_state and st.session_state['cat_box'] not in current_cat_opts:
+                    del st.session_state['cat_box']
+                # --------------------------------------------------------------------------------------
 
-                selected_cat = st.selectbox("📂 客戶類別", current_cat_opts, index=cat_index, key="cat_box")
+                selected_cat = st.selectbox("📂 客戶類別", current_cat_opts, key="cat_box")
                 
                 if selected_cat == "➕ 新增類別...":
                     final_cat = st.text_input("✍️ 請輸入新類別名稱")
@@ -454,15 +455,12 @@ def main():
                     final_cat = selected_cat
                     client_opts = company_dict.get(selected_cat, []) + ["➕ 新增客戶..."]
 
-                # --- FIX: 計算正確的 Client Index ---
-                client_index = 0
-                if not found_client and is_edit:
-                    target_client = edit_data.get('客戶名稱')
-                    if target_client and target_client in client_opts:
-                        client_index = client_opts.index(target_client)
-                # -----------------------------------
+                # --- FIX: 同樣對客戶名稱做防呆檢查 ---
+                if 'client_box' in st.session_state and st.session_state['client_box'] not in client_opts:
+                    del st.session_state['client_box']
+                # ----------------------------------
 
-                selected_client = st.selectbox("👤 客戶名稱", client_opts, index=client_index, key="client_box")
+                selected_client = st.selectbox("👤 客戶名稱", client_opts, key="client_box")
                 
                 if selected_client == "➕ 新增客戶...": final_client = st.text_input("✍️ 請輸入新客戶名稱")
                 else: final_client = selected_client
@@ -603,6 +601,11 @@ def main():
                         st.session_state['pay_list'] = []
                         st.session_state['edit_mode'] = False
                         st.session_state['edit_data'] = {}
+                        
+                        # 儲存後也清除下拉選單記憶
+                        if 'cat_box' in st.session_state: del st.session_state['cat_box']
+                        if 'client_box' in st.session_state: del st.session_state['client_box']
+                        
                         st.cache_data.clear()
                         time.sleep(2)
                         st.rerun()
@@ -683,9 +686,21 @@ def main():
                     st.session_state['edit_mode'] = True
                     st.session_state['edit_data'] = row_dict
                     
-                    # --- FIX START: 清除舊的下拉選單狀態，確保進入編輯頁面時會抓取新的 index ---
-                    if 'cat_box' in st.session_state: del st.session_state['cat_box']
-                    if 'client_box' in st.session_state: del st.session_state['client_box']
+                    # --- FIX START: 直接把從表格抓到的客戶與類別，塞進 Session State 的變數中 ---
+                    # 這是最直接的「強制覆寫」，不管下拉選單原本停在哪裡，都會被這裡的值蓋過去。
+                    target_cat = str(row_dict.get('客戶類別', '')).strip()
+                    target_client = str(row_dict.get('客戶名稱', '')).strip()
+                    
+                    # 確保資料存在於字典中，才寫入 Session State，避免報錯
+                    if target_cat in company_dict:
+                        st.session_state['cat_box'] = target_cat
+                        # 確認該類別下有這個客戶
+                        if target_client in company_dict[target_cat]:
+                            st.session_state['client_box'] = target_client
+                    else:
+                        # 萬一資料庫的類別對不上，就清除變數，讓它回到預設值
+                        if 'cat_box' in st.session_state: del st.session_state['cat_box']
+                        if 'client_box' in st.session_state: del st.session_state['client_box']
                     # --- FIX END ---
                     
                     st.session_state['current_page'] = "📝 新增業務登記"
