@@ -239,47 +239,62 @@ def smart_save_record(data_dict, is_update=False):
 # 🔥 修改處：重寫編號計算邏輯，確保每年歸零
 def calculate_next_id(df_all, target_year):
     """
-    1. 讀取所有資料。
-    2. 解析日期，篩選出符合 target_year 的資料。
-    3. 如果該年沒資料 -> 回傳 1。
-    4. 如果該年有資料 -> 取最大值 + 1。
+    嚴格版編號計算：
+    1. 不依賴通用的日期解析，避免將簡寫日期誤判為今年。
+    2. 直接檢查日期字串中是否包含 'yyyy' 或 'ROC年'。
     """
+    # 1. 如果資料表是空的，回傳 1
     if df_all.empty: return 1
     
-    # 找到日期欄位
+    # 2. 尋找日期與編號欄位 (模糊比對，避免欄位名稱有空白)
     date_col = next((c for c in df_all.columns if '日期' in c), None)
-    if not date_col: return 1
+    id_col = next((c for c in df_all.columns if '編號' in c), None)
 
-    # 複製一份資料處理，避免影響原始 DataFrame
-    df_temp = df_all.copy()
-    
-    # 解析日期 (使用上面定義的 parse_taiwan_date)
-    df_temp['temp_date'] = df_temp[date_col].apply(parse_taiwan_date)
-    
-    # 建立年份欄位 (無效日期會變成 NaN)
-    df_temp['year_val'] = df_temp['temp_date'].dt.year
+    # 如果找不到欄位，回傳 1
+    if not date_col or not id_col: return 1
 
-    # 篩選：只留目標年份的資料
-    df_this_year = df_temp[df_temp['year_val'] == target_year].copy()
+    max_id = 0
+    found_any_record = False
 
-    # 如果該年份完全沒有資料，直接回傳 1 (解決 2026 年問題)
-    if df_this_year.empty:
+    # 民國年換算 (例如 2026 -> 115)
+    roc_year = str(target_year - 1911)
+    target_year_str = str(target_year)
+
+    # 3. 逐行檢查 (不轉成 datetime 物件，直接看字串，最準確)
+    for index, row in df_all.iterrows():
+        d_str = str(row[date_col]).strip()
+        id_val = str(row[id_col]).strip()
+
+        # 如果日期空白或編號空白，跳過
+        if not d_str or not id_val: continue
+        
+        # 判斷是否為今年：
+        # 條件 A: 字串裡包含 '2026' (西元)
+        # 條件 B: 字串裡包含 '115' (民國，需避免誤判像 11/5 這種日期，所以通常民國年會寫在最前面)
+        is_target = False
+        
+        if target_year_str in d_str: # 檢查 2026
+            is_target = True
+        elif d_str.startswith(roc_year): # 檢查 115 開頭 (例如 115/01/01)
+            is_target = True
+        
+        if is_target:
+            # 嘗試抓出編號的最大值
+            try:
+                # 處理像 '74.0' 這樣的數字格式
+                curr_num = int(float(id_val))
+                if curr_num > max_id:
+                    max_id = curr_num
+                found_any_record = True
+            except:
+                pass # 如果編號不是數字就跳過
+
+    # 4. 如果今年完全沒找到任何紀錄，回傳 1
+    if not found_any_record:
         return 1
-
-    # 如果有資料，解析編號欄位
-    if '編號' not in df_this_year.columns:
-        return 1
-
-    # 轉數字，無法轉的變 NaN
-    df_this_year['id_num'] = pd.to_numeric(df_this_year['編號'], errors='coerce')
     
-    # 找出最大值
-    max_id = df_this_year['id_num'].max()
-    
-    if pd.isna(max_id):
-        return 1
-    else:
-        return int(max_id) + 1
+    # 否則回傳 最大值 + 1
+    return max_id + 1
 
 def get_yahoo_rate(target_currency, query_date, inverse=False):
     try:
