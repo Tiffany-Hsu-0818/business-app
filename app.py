@@ -19,7 +19,8 @@ except ImportError:
 # ==========================================
 SPREADSHEET_KEY = '1Q1-JbHje0E-8QB0pu83OHN8jCPY8We9l2j1_7eZ8yas'
 
-# 🔥【關鍵設定】強制指定您要求的標準欄位順序
+# 🔥【關鍵設定】依照您提供的截圖與描述，強制指定標準欄位順序
+# 包含您提到的 "發票截收日期"
 TARGET_COLS = [
     "編號", "日期", "客戶類別", "客戶名稱", "案號", "完稅價格", 
     "預定交期", "出貨日期", "發票日期", "發票截收日期", "收款日期", "進出口匯率", "備註"
@@ -70,7 +71,7 @@ def clean_headers(headers):
     for i, col in enumerate(headers):
         c = str(col).strip()
         if not c: c = f"未命名_{i}"
-        # 移除不可見字元，避免欄位名稱對不上
+        # 移除不可見字元
         c = "".join(ch for ch in c if ch.isprintable())
         if c in seen:
             seen[c] += 1
@@ -80,7 +81,31 @@ def clean_headers(headers):
         cleaned.append(c)
     return cleaned
 
-def parse_taiwan_date(date_str):
+def parse_taiwan_date_strict(date_str):
+    """
+    🔥【嚴格版日期解析】
+    絕對不自動補年份！如果只有月/日，直接視為無效日期 (NaT)，
+    避免把 2024 的舊簡寫資料誤判為 2026。
+    """
+    if pd.isna(date_str) or str(date_str).strip() == "": return pd.NaT
+    s = str(date_str).split(',')[0].strip().replace(".", "/").replace("-", "/")
+    try:
+        parts = s.split('/')
+        if len(parts) == 3:
+            # 只有完整的 年/月/日 才接受
+            year_val = int(parts[0])
+            if year_val < 1911: year_val += 1911
+            return pd.to_datetime(f"{year_val}-{parts[1]}-{parts[2]}")
+        elif len(parts) == 2:
+            # ❌【關鍵修改】如果只有兩段 (例如 12/05)，回傳 NaT (無效)
+            # 這樣就不會把舊資料誤判成今年了
+            return pd.NaT
+        else: 
+            return pd.NaT
+    except: return pd.NaT
+
+# 為了表單顯示，保留一個寬鬆版解析給 UI 用，但不給計算 ID 用
+def parse_date_for_ui(date_str):
     if pd.isna(date_str) or str(date_str).strip() == "": return pd.NaT
     s = str(date_str).split(',')[0].strip().replace(".", "/").replace("-", "/")
     try:
@@ -96,14 +121,13 @@ def parse_taiwan_date(date_str):
             return pd.to_datetime(s)
     except: return pd.NaT
 
-@st.cache_data(ttl=5) # 🔥 縮短快取時間，避免卡住
+@st.cache_data(ttl=5)
 def load_data_from_gsheet():
     for attempt in range(3):
         try:
             client = get_google_sheet_client()
             sh = client.open_by_key(SPREADSHEET_KEY)
             
-            # 讀取公司名單
             try:
                 ws_c = sh.get_worksheet(1)
                 if ws_c:
@@ -117,7 +141,6 @@ def load_data_from_gsheet():
                 else: cd = {}
             except: cd = {}
 
-            # 讀取業務紀錄
             try:
                 ws_f = sh.get_worksheet(0)
                 if ws_f:
@@ -125,7 +148,6 @@ def load_data_from_gsheet():
                     header_idx = -1
                     for i, row in enumerate(all_values[:10]):
                         r_str = [str(r).strip() for r in row]
-                        # 🔥 只要找到「編號」跟「日期」就認為是標題列
                         if "編號" in r_str and "日期" in r_str:
                             header_idx = i
                             break
@@ -142,7 +164,7 @@ def load_data_from_gsheet():
     return {}, pd.DataFrame()
 
 # ==========================================
-# 🛠️ 資料處理與計算邏輯
+# 🛠️ 資料處理邏輯
 # ==========================================
 
 def update_company_category_in_sheet(client_name, new_category):
@@ -210,10 +232,7 @@ def smart_save_record(data_dict, is_update=False):
 
             row_to_write = [""] * len(headers)
             
-            # 🔥 根據使用者提供的欄位對應寫入
-            # 將 data_dict 的 key 對應到 headers 的 index
             for col_name, value in data_dict.items():
-                # 模糊比對，避免空白造成的問題
                 for i, h in enumerate(headers):
                     if str(h).strip() == col_name:
                         row_to_write[i] = str(value)
@@ -245,48 +264,46 @@ def smart_save_record(data_dict, is_update=False):
 def calculate_next_id(df_all, target_year):
     """
     🔥 超級嚴格版編號計算
-    只會看「日期」這一欄，不會看「發票日期」或其他。
+    1. 只使用 strict 解析 (不自動補年份)
+    2. 回傳 debug DataFrame 讓使用者抓鬼
     """
     if df_all.empty: 
-        return 1, "資料表為空"
+        return 1, pd.DataFrame()
     
-    # 1. 精準鎖定「日期」欄位 (優先找完全符合的)
     date_col = None
     if "日期" in df_all.columns:
         date_col = "日期"
     else:
-        # 如果找不到完全符合的，才找包含的，但排除「發票」、「收款」等關鍵字
         candidates = [c for c in df_all.columns if '日期' in c and '發票' not in c and '收款' not in c and '出貨' not in c and '交期' not in c]
-        if candidates:
-            date_col = candidates[0]
+        if candidates: date_col = candidates[0]
             
     id_col = next((c for c in df_all.columns if '編號' in c), None)
 
     if not date_col or not id_col: 
-        return 1, f"找不到關鍵欄位 (日期: {date_col}, 編號: {id_col})"
+        return 1, pd.DataFrame()
 
-    # 2. 複製資料處理
     df_temp = df_all.copy()
-    df_temp['temp_date'] = df_temp[date_col].apply(parse_taiwan_date)
+    # 🔥 使用嚴格解析！不自動補年！
+    df_temp['temp_date'] = df_temp[date_col].apply(parse_taiwan_date_strict)
     df_temp['temp_year'] = df_temp['temp_date'].dt.year
     
-    # 3. 篩選年份
     df_filtered = df_temp[df_temp['temp_year'] == target_year]
     
-    debug_msg = f"年份 {target_year} | 欄位: {date_col} | 總筆數: {len(df_temp)} | 該年筆數: {len(df_filtered)}"
+    # 回傳這些被判定為當年度的資料，供 Debug
+    debug_df = df_filtered[[id_col, date_col]].copy() if not df_filtered.empty else pd.DataFrame()
 
     if df_filtered.empty:
-        return 1, debug_msg
+        return 1, debug_df
     
     try:
         df_filtered['id_num'] = pd.to_numeric(df_filtered[id_col], errors='coerce')
         max_id = df_filtered['id_num'].max()
         
         if pd.isna(max_id):
-            return 1, debug_msg + " | 最大值為空"
-        return int(max_id) + 1, debug_msg + f" | 最大值: {int(max_id)}"
+            return 1, debug_df
+        return int(max_id) + 1, debug_df
     except:
-        return 1, debug_msg + " | 計算發生錯誤"
+        return 1, debug_df
 
 def get_yahoo_rate(target_currency, query_date, inverse=False):
     try:
@@ -364,16 +381,16 @@ def main():
         if is_edit and edit_data:
             try:
                 if edit_data.get('日期'):
-                    def_date = parse_taiwan_date(edit_data['日期'])
+                    def_date = parse_date_for_ui(edit_data['日期'])
                     if pd.isna(def_date): def_date = datetime.today()
                 
                 if not st.session_state.get('inv_list') and edit_data.get('發票日期'):
                     dates = str(edit_data['發票日期']).split(',')
-                    st.session_state['inv_list'] = [parse_taiwan_date(d) for d in dates if parse_taiwan_date(d) is not pd.NaT]
+                    st.session_state['inv_list'] = [parse_date_for_ui(d) for d in dates if parse_date_for_ui(d) is not pd.NaT]
                 
                 if not st.session_state.get('pay_list') and edit_data.get('收款日期'):
                     dates = str(edit_data['收款日期']).split(',')
-                    st.session_state['pay_list'] = [parse_taiwan_date(d) for d in dates if parse_taiwan_date(d) is not pd.NaT]
+                    st.session_state['pay_list'] = [parse_date_for_ui(d) for d in dates if parse_date_for_ui(d) is not pd.NaT]
                 
                 def_project = edit_data.get('案號', "")
                 p_val = str(edit_data.get('完稅價格', "0")).replace(",", "")
@@ -473,14 +490,15 @@ def main():
                     current_id = edit_data.get('編號')
                     st.metric(label="✨ 編輯案件編號", value=f"No. {current_id}")
                 else:
-                    # 使用新的邏輯並顯示 Debug 資訊
-                    next_id, debug_info = calculate_next_id(df_business, input_date.year)
+                    next_id, debug_df = calculate_next_id(df_business, input_date.year)
                     st.metric(label=f"✨ {input_date.year} 新案件編號", value=f"No. {next_id}", delta="Auto")
                     
-                    # 🔥 除錯資訊面板
-                    with st.sidebar.expander(f"🐞 除錯資訊 ({input_date.year})"):
-                        st.write(debug_info)
-                        st.caption("若 '該年筆數' 不為 0 但編號不正確，請檢查 Google Sheet 是否有髒資料。")
+                    # 🔥 抓鬼面板：如果編號不是 1，就顯示抓到的資料
+                    if next_id > 1:
+                        with st.sidebar.expander(f"🕵️‍♂️ 誰被算在 {input_date.year} 年？", expanded=True):
+                            st.error(f"系統發現 {len(debug_df)} 筆資料屬於 {input_date.year} 年！")
+                            st.dataframe(debug_df, hide_index=True)
+                            st.caption("如果這裡出現舊資料（例如日期只寫 12/05 沒寫年份的），請去 Google Sheet 把年份補上。")
 
                 project_no = st.text_input("🔖 案號 / 產品名稱", value=def_project)
                 price = st.number_input("💰 完稅價格 (TWD)", min_value=0, step=1000, format="%d", value=def_price)
@@ -491,12 +509,12 @@ def main():
             
             d_del_def = None
             d_ship_def = None
-            d_inv_deadline_def = None # 新增發票截收
+            d_inv_deadline_def = None 
             
             if is_edit:
-                d_del_def = parse_taiwan_date(edit_data.get('預定交期'))
-                d_ship_def = parse_taiwan_date(edit_data.get('出貨日期'))
-                d_inv_deadline_def = parse_taiwan_date(edit_data.get('發票截收日期'))
+                d_del_def = parse_date_for_ui(edit_data.get('預定交期'))
+                d_ship_def = parse_date_for_ui(edit_data.get('出貨日期'))
+                d_inv_deadline_def = parse_date_for_ui(edit_data.get('發票截收日期'))
             
             has_del_init = True if (d_del_def and not pd.isna(d_del_def)) else False
             has_ship_init = True if (d_ship_def and not pd.isna(d_ship_def)) else False
@@ -589,7 +607,6 @@ def main():
 
                 save_id = edit_data.get('編號') if is_edit else next_id
 
-                # 🔥 對應 TARGET_COLS
                 data_to_save = {
                     "編號": save_id,
                     "日期": ds_str,
@@ -600,7 +617,7 @@ def main():
                     "預定交期": eds_str,
                     "出貨日期": ship_str, 
                     "發票日期": ids_str,
-                    "發票截收日期": inv_dead_str, # 新增
+                    "發票截收日期": inv_dead_str, 
                     "收款日期": pds_str,
                     "進出口匯率": final_ex,
                     "備註": remark
@@ -650,7 +667,6 @@ def main():
                 df_clean[price_col] = df_clean[price_col].astype(str).str.replace(',', '').replace('', '0')
                 df_clean[price_col] = pd.to_numeric(df_clean[price_col], errors='coerce').fillna(0)
             
-            # 🔥 精準抓日期欄位
             date_col = None
             if "日期" in df_clean.columns:
                 date_col = "日期"
@@ -659,11 +675,17 @@ def main():
                 if candidates: date_col = candidates[0]
 
             if date_col:
-                df_clean['parsed_date'] = df_clean[date_col].apply(parse_taiwan_date)
+                # 這裡也要用嚴格模式，不然戰情室會把舊資料算進來
+                df_clean['parsed_date'] = df_clean[date_col].apply(parse_taiwan_date_strict)
                 df_valid = df_clean.dropna(subset=['parsed_date']).copy()
                 df_valid['Year'] = df_valid['parsed_date'].dt.year
                 
                 all_years = sorted(df_valid['Year'].unique().astype(int), reverse=True)
+                
+                # 如果 2026 還沒有任何合法資料，手動補上選項，避免無法選
+                if 2026 not in all_years:
+                    all_years.insert(0, 2026)
+
                 selected_year = st.selectbox("📅 請選擇年份", all_years)
                 
                 df_final = df_valid[df_valid['Year'] == selected_year].sort_values(by='parsed_date', ascending=False)
@@ -705,16 +727,14 @@ def main():
                         st.plotly_chart(fig_bar, use_container_width=True)
                 
                 st.markdown("---")
-
-                # --- 🔥【關鍵修正】強制欄位順序與過濾雜訊 ---
+                
                 st.subheader(f"📝 {selected_year} 詳細資料")
-                st.warning("💡 **重要提醒：** 為了確保資料整潔，這裡只顯示標準欄位。如果您看到之前誤增的 2026 年資料 (No.74)，請務必到 Google Sheet 手動刪除。")
+                st.warning("💡 **提醒：** 這裡只會顯示日期格式正確（包含完整年份）的資料。舊資料若只寫 12/05 沒寫年份，不會顯示於此，以避免誤判。")
 
-                # 只保留存在於資料中的標準欄位
                 valid_cols = [c for c in TARGET_COLS if c in df_final.columns]
                 
                 selection = st.dataframe(
-                    df_final[valid_cols],  # 強制過濾
+                    df_final[valid_cols],
                     use_container_width=True,
                     on_select="rerun",
                     selection_mode="single-row",
