@@ -437,11 +437,15 @@ def main():
                 
                 current_cat_opts = list(company_dict.keys()) + ["➕ 新增類別..."]
                 
-                if not found_cat:
-                    target_cat = edit_data.get('客戶類別') if is_edit else None
-                    if target_cat and target_cat in current_cat_opts: pass
+                # --- FIX: 計算正確的 Index 讓 selectbox 正確預選 ---
+                cat_index = 0
+                if not found_cat and is_edit:
+                    target_cat = edit_data.get('客戶類別')
+                    if target_cat and target_cat in current_cat_opts:
+                        cat_index = current_cat_opts.index(target_cat)
+                # ------------------------------------------------
 
-                selected_cat = st.selectbox("📂 客戶類別", current_cat_opts, key="cat_box")
+                selected_cat = st.selectbox("📂 客戶類別", current_cat_opts, index=cat_index, key="cat_box")
                 
                 if selected_cat == "➕ 新增類別...":
                     final_cat = st.text_input("✍️ 請輸入新類別名稱")
@@ -450,7 +454,15 @@ def main():
                     final_cat = selected_cat
                     client_opts = company_dict.get(selected_cat, []) + ["➕ 新增客戶..."]
 
-                selected_client = st.selectbox("👤 客戶名稱", client_opts, key="client_box")
+                # --- FIX: 計算正確的 Client Index ---
+                client_index = 0
+                if not found_client and is_edit:
+                    target_client = edit_data.get('客戶名稱')
+                    if target_client and target_client in client_opts:
+                        client_index = client_opts.index(target_client)
+                # -----------------------------------
+
+                selected_client = st.selectbox("👤 客戶名稱", client_opts, index=client_index, key="client_box")
                 
                 if selected_client == "➕ 新增客戶...": final_client = st.text_input("✍️ 請輸入新客戶名稱")
                 else: final_client = selected_client
@@ -670,6 +682,12 @@ def main():
                     
                     st.session_state['edit_mode'] = True
                     st.session_state['edit_data'] = row_dict
+                    
+                    # --- FIX START: 清除舊的下拉選單狀態，確保進入編輯頁面時會抓取新的 index ---
+                    if 'cat_box' in st.session_state: del st.session_state['cat_box']
+                    if 'client_box' in st.session_state: del st.session_state['client_box']
+                    # --- FIX END ---
+                    
                     st.session_state['current_page'] = "📝 新增業務登記"
                     st.rerun()
             else: st.error("資料表中找不到日期欄位")
