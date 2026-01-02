@@ -74,15 +74,13 @@ def clean_headers(headers):
 
 def parse_taiwan_date(date_str):
     """
-    通用日期解析：用於顯示與編輯時的寬鬆解析
-    注意：如果只有兩碼 (如 12/05)，會預設為今年。
+    通用日期解析
     """
     if pd.isna(date_str) or str(date_str).strip() == "": return pd.NaT
     s = str(date_str).split(',')[0].strip().replace(".", "/")
     try:
         parts = s.split('/')
         if len(parts) == 2:
-            # ⚠️ 這裡會使用當下年份，對於舊資料分析需小心使用
             this_year = datetime.now().year
             return pd.to_datetime(f"{this_year}-{parts[0]}-{parts[1]}")
         elif len(parts) == 3:
@@ -108,7 +106,6 @@ def load_data_from_gsheet():
                         headers = clean_headers(data[0])
                         df = pd.DataFrame(data[1:], columns=headers)
                         df = df.replace(r'^\s*$', pd.NA, regex=True).dropna(how='all')
-                        # 加入 .strip() 確保去除前後空白
                         cd = {col: [str(x).strip() for x in df[col].values if pd.notna(x) and str(x).strip()] for col in df.columns}
                     else: cd = {}
                 else: cd = {}
@@ -241,11 +238,9 @@ def smart_save_record(data_dict, is_update=False):
 
 def calculate_next_id(df_all, target_year):
     """
-    🔥 修正版編號計算邏輯：
-    1. 嚴格解析日期：【必須】包含年份 (3個部分)，忽略只有月/日的簡寫。
-       避免將舊資料的 "12/05" 誤判為今年的 "2026-12-05"。
-    2. 篩選年份。
-    3. 取最大值 + 1。
+    🔥 修正版編號計算邏輯 (解決 2026 年編號未歸零問題)：
+    1. 嚴格解析日期：必須包含完整年份，且該年份必須等於 target_year。
+    2. 如果該年份沒有任何資料，直接回傳 1。
     """
     if df_all.empty: return 1
     if '編號' not in df_all.columns: return 1
@@ -257,16 +252,14 @@ def calculate_next_id(df_all, target_year):
         df_temp = df_all[['編號', date_col]].copy()
         df_temp['id_num'] = pd.to_numeric(df_temp['編號'], errors='coerce')
         
-        # 定義嚴格的年份解析函式
+        # 嚴格的年份解析
         def get_strict_year(x):
             if pd.isna(x) or str(x).strip() == "": return None
             s = str(x).strip().replace(".", "/").replace("-", "/")
             parts = s.split('/')
-            # 只有當長度為 3 (年/月/日) 時才採納，長度為 2 (月/日) 視為無效年份，避免誤判
-            if len(parts) == 3:
+            if len(parts) == 3: # 必須是 yyyy/mm/dd 格式
                 try:
                     year_val = int(parts[0])
-                    # 處理民國年
                     if year_val < 1911: year_val += 1911
                     return year_val
                 except: return None
@@ -277,6 +270,10 @@ def calculate_next_id(df_all, target_year):
         # 篩選該年份資料
         df_year_filtered = df_temp[df_temp['year_num'] == target_year]
         
+        # 如果該年份完全沒資料 (例如 2026)，直接回傳 1
+        if df_year_filtered.empty: 
+            return 1
+            
         ids = df_year_filtered['id_num'].dropna()
         if ids.empty: return 1
         return int(ids.max()) + 1
@@ -311,10 +308,12 @@ def main():
             st.session_state['current_page'] = "📝 新增業務登記"
             st.session_state['edit_mode'] = False
             st.session_state['edit_data'] = {}
-            # 切換回新增模式時，清空搜尋欄與暫存，避免干擾
             st.session_state['search_input'] = "" 
             st.session_state['inv_list'] = []
             st.session_state['pay_list'] = []
+            # 清除強制設定的選單狀態
+            if 'cat_box_idx' in st.session_state: del st.session_state['cat_box_idx']
+            if 'client_box_idx' in st.session_state: del st.session_state['client_box_idx']
             st.rerun()
             
         if st.button("📊 數據戰情室", use_container_width=True):
@@ -387,7 +386,6 @@ def main():
             
             found_cat, found_client = None, None
 
-            # 只有當搜尋欄有值時，才進行搜尋覆蓋邏輯
             if search_keyword:
                 norm_key = normalize_text(search_keyword)
                 matches = []
@@ -414,17 +412,19 @@ def main():
                         found_client = target_str[:split_idx]
                         found_cat = target_str[split_idx+2:-1]
                         
-                        need_rerun = False
-                        if found_cat and st.session_state.get('cat_box') != found_cat:
-                            st.session_state['cat_box'] = found_cat
-                            need_rerun = True
+                        # 搜尋結果直接強制覆寫 session state 中的 index
+                        # 這裡我們不寫入 box 的 value，而是透過 index 控制，或者直接 rerun
+                        # 為了簡單，這裡用 rerun 配合 session state 存值
                         
-                        if found_client and st.session_state.get('client_box') != found_client:
-                            st.session_state['client_box'] = found_client
-                            need_rerun = True
-                            
-                        if need_rerun:
-                            st.rerun()
+                        # 需要先確認這個 client 在不在名單裡，不在要加
+                        if found_cat not in company_dict: company_dict[found_cat] = []
+                        if found_client not in company_dict[found_cat]: company_dict[found_cat].append(found_client)
+                        
+                        # 設定強制選取的標記
+                        st.session_state['force_cat'] = found_cat
+                        st.session_state['force_client'] = found_client
+                        st.rerun()
+
                     except: pass
             
             # ==========================================
@@ -434,19 +434,32 @@ def main():
             with c1:
                 input_date = st.date_input("📅 填表日期", def_date)
                 
-                # 類別清單
+                # 準備下拉選單的選項
                 current_cat_opts = list(company_dict.keys()) + ["➕ 新增類別..."]
                 
-                # 🔥 修正重點：確保下拉選單能正確接收 session_state 的值
-                # 這裡不使用 default index 計算，完全依賴 st.session_state['cat_box']
-                # 如果 'cat_box' 不在選項中（例如舊資料的類別），自動加入選項避免報錯
+                # 決定預設選取項 (Index)
+                # 優先級：搜尋結果 (force_cat) > 編輯資料 (edit_data) > 預設 (0)
                 
-                current_cat_val = st.session_state.get('cat_box')
-                if current_cat_val and current_cat_val not in current_cat_opts:
-                     current_cat_opts.insert(0, current_cat_val)
+                final_cat_idx = 0
+                target_cat = None
                 
-                selected_cat = st.selectbox("📂 客戶類別", current_cat_opts, key="cat_box")
+                # 檢查是否有強制寫入 (來自搜尋或編輯)
+                if 'force_cat' in st.session_state:
+                    target_cat = st.session_state.pop('force_cat') # 取出後刪除，避免卡住
+                elif is_edit and '客戶類別' in edit_data:
+                    target_cat = edit_data['客戶類別']
                 
+                # 如果目標類別不在清單中，自動補入，確保 index 找得到
+                if target_cat and target_cat not in current_cat_opts:
+                    current_cat_opts.insert(0, target_cat)
+                
+                if target_cat in current_cat_opts:
+                    final_cat_idx = current_cat_opts.index(target_cat)
+
+                # 客戶類別選單
+                selected_cat = st.selectbox("📂 客戶類別", current_cat_opts, index=final_cat_idx, key="cat_box")
+                
+                # 處理客戶名稱清單
                 if selected_cat == "➕ 新增類別...":
                     final_cat = st.text_input("✍️ 請輸入新類別名稱")
                     client_opts = ["➕ 新增客戶..."]
@@ -454,12 +467,23 @@ def main():
                     final_cat = selected_cat
                     client_opts = company_dict.get(selected_cat, []) + ["➕ 新增客戶..."]
 
-                # 同樣處理客戶名稱
-                current_client_val = st.session_state.get('client_box')
-                if current_client_val and current_client_val not in client_opts:
-                    client_opts.insert(0, current_client_val)
+                # 決定客戶名稱 Index
+                final_client_idx = 0
+                target_client = None
+                
+                if 'force_client' in st.session_state:
+                    target_client = st.session_state.pop('force_client')
+                elif is_edit and '客戶名稱' in edit_data:
+                    target_client = edit_data['客戶名稱']
+                
+                if target_client and target_client not in client_opts:
+                    client_opts.insert(0, target_client)
+                    
+                if target_client in client_opts:
+                    final_client_idx = client_opts.index(target_client)
 
-                selected_client = st.selectbox("👤 客戶名稱", client_opts, key="client_box")
+                # 客戶名稱選單
+                selected_client = st.selectbox("👤 客戶名稱", client_opts, index=final_client_idx, key="client_box")
                 
                 if selected_client == "➕ 新增客戶...":
                     final_client = st.text_input("✍️ 請輸入新客戶名稱")
@@ -604,7 +628,7 @@ def main():
                         st.session_state['pay_list'] = []
                         st.session_state['edit_mode'] = False
                         st.session_state['edit_data'] = {}
-                        st.session_state['search_input'] = "" # 儲存後清空搜尋
+                        st.session_state['search_input'] = "" 
                         
                         st.cache_data.clear()
                         time.sleep(2)
@@ -683,7 +707,6 @@ def main():
                 # --- 詳細資料列表 (點選編輯功能) ---
                 st.subheader(f"📝 {selected_year} 詳細資料")
                 
-                # 🔥 修正重點：使用更明顯的警告框來提示操作
                 st.warning("💡 **操作提示：** 請直接點選表格中的任一列，系統將自動跳轉至編輯頁面並帶入該筆資料。")
 
                 display_cols = [c for c in df_final.columns if c not in ['Year', 'parsed_date']]
@@ -709,15 +732,15 @@ def main():
                     st.session_state['edit_data'] = row_dict
                     st.session_state['current_page'] = "📝 新增業務登記"
                     
-                    # 🔥 關鍵修正：
-                    # 1. 強制清空搜尋欄，防止搜尋狀態覆蓋了編輯資料
-                    st.session_state['search_input'] = ""
-                    
-                    # 2. 強制更新 Session State 中的下拉選單值，並使用 .strip() 去除空白誤差
+                    # 🔥 關鍵修正 (Issue 2 解決方案)：
+                    # 使用 force_cat / force_client 變數，強迫下一頁的 Selectbox 讀取這個值
                     if '客戶類別' in row_dict:
-                        st.session_state['cat_box'] = str(row_dict['客戶類別']).strip()
+                        st.session_state['force_cat'] = str(row_dict['客戶類別']).strip()
                     if '客戶名稱' in row_dict:
-                        st.session_state['client_box'] = str(row_dict['客戶名稱']).strip()
+                        st.session_state['force_client'] = str(row_dict['客戶名稱']).strip()
+                    
+                    # 清空搜尋欄，避免干擾
+                    st.session_state['search_input'] = ""
                         
                     st.rerun()
             else:
