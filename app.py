@@ -42,7 +42,6 @@ def get_google_sheet_client():
                 if os.path.exists(local_key_file):
                     creds = ServiceAccountCredentials.from_json_keyfile_name(local_key_file, scope)
                 else:
-                    # 本地備用路徑
                     local_key_file_old = r'C:\Users\User\Desktop\業務登記表\service_account.json'
                     if os.path.exists(local_key_file_old):
                         creds = ServiceAccountCredentials.from_json_keyfile_name(local_key_file_old, scope)
@@ -123,9 +122,7 @@ def load_data_from_gsheet():
                     if header_idx != -1 and len(all_values) > header_idx + 1:
                         headers = clean_headers(all_values[header_idx])
                         df_b = pd.DataFrame(all_values[header_idx+1:], columns=headers)
-                        # 簡單過濾
                         if '編號' in df_b.columns:
-                            # 這裡先不過濾編號為空的行，避免濾掉雖然有日期但沒編號的異常資料，留給計算邏輯處理
                             df_b = df_b
                         else: df_b = pd.DataFrame()
                     else: df_b = pd.DataFrame()
@@ -236,64 +233,46 @@ def smart_save_record(data_dict, is_update=False):
             return False, f"寫入失敗: {e}"
     return False, "連線逾時"
 
-# 🔥 修改處：重寫編號計算邏輯，確保每年歸零
+# 🔥【關鍵修正】嚴格版編號計算
 def calculate_next_id(df_all, target_year):
-    """
-    嚴格版編號計算：
-    1. 不依賴通用的日期解析，避免將簡寫日期誤判為今年。
-    2. 直接檢查日期字串中是否包含 'yyyy' 或 'ROC年'。
-    """
-    # 1. 如果資料表是空的，回傳 1
     if df_all.empty: return 1
     
-    # 2. 尋找日期與編號欄位 (模糊比對，避免欄位名稱有空白)
     date_col = next((c for c in df_all.columns if '日期' in c), None)
     id_col = next((c for c in df_all.columns if '編號' in c), None)
 
-    # 如果找不到欄位，回傳 1
     if not date_col or not id_col: return 1
 
     max_id = 0
     found_any_record = False
 
-    # 民國年換算 (例如 2026 -> 115)
     roc_year = str(target_year - 1911)
     target_year_str = str(target_year)
 
-    # 3. 逐行檢查 (不轉成 datetime 物件，直接看字串，最準確)
     for index, row in df_all.iterrows():
         d_str = str(row[date_col]).strip()
         id_val = str(row[id_col]).strip()
 
-        # 如果日期空白或編號空白，跳過
         if not d_str or not id_val: continue
         
-        # 判斷是否為今年：
-        # 條件 A: 字串裡包含 '2026' (西元)
-        # 條件 B: 字串裡包含 '115' (民國，需避免誤判像 11/5 這種日期，所以通常民國年會寫在最前面)
+        # 嚴格判斷年份：字串中必須真的包含 '2026' 或 '115'
         is_target = False
-        
-        if target_year_str in d_str: # 檢查 2026
+        if target_year_str in d_str: 
             is_target = True
-        elif d_str.startswith(roc_year): # 檢查 115 開頭 (例如 115/01/01)
+        elif d_str.startswith(roc_year): 
             is_target = True
         
         if is_target:
-            # 嘗試抓出編號的最大值
             try:
-                # 處理像 '74.0' 這樣的數字格式
                 curr_num = int(float(id_val))
                 if curr_num > max_id:
                     max_id = curr_num
                 found_any_record = True
             except:
-                pass # 如果編號不是數字就跳過
+                pass
 
-    # 4. 如果今年完全沒找到任何紀錄，回傳 1
     if not found_any_record:
         return 1
     
-    # 否則回傳 最大值 + 1
     return max_id + 1
 
 def get_yahoo_rate(target_currency, query_date, inverse=False):
@@ -329,7 +308,7 @@ def main():
             st.session_state['inv_list'] = []
             st.session_state['pay_list'] = []
             
-            # 🔥 修改處：切換頁面時，清除選單狀態，避免卡住
+            # 清除選單狀態
             if 'cat_box' in st.session_state: del st.session_state['cat_box']
             if 'client_box' in st.session_state: del st.session_state['client_box']
             if 'force_cat' in st.session_state: del st.session_state['force_cat']
@@ -397,17 +376,10 @@ def main():
         with st.container(border=True):
             st.markdown("### 🏢 客戶與基本資料")
             
-            # ==========================================
-            # 🔍 搜尋邏輯
-            # ==========================================
-            def normalize_text(text):
-                return str(text).replace('臺', '台').strip()
-
             search_keyword = st.text_input("🔍 快速搜尋客戶 (輸入後按 Enter)", placeholder="例如：台積 (支援台/臺互通)", key="search_input")
             
-            found_cat, found_client = None, None
-
             if search_keyword:
+                def normalize_text(text): return str(text).replace('臺', '台').strip()
                 norm_key = normalize_text(search_keyword)
                 matches = []
                 for cat, clients in company_dict.items():
@@ -415,51 +387,34 @@ def main():
                         if norm_key in normalize_text(client):
                             matches.append(f"{client} ({cat})")
                 
-                target_str = None
-                if len(matches) == 0:
-                    st.warning("❌ 找不到符合的客戶，請直接於下方填寫。")
-                elif len(matches) == 1:
+                if len(matches) == 1:
                     target_str = matches[0]
                     st.success(f"✅ 已自動填入：{target_str}")
-                else:
-                    st.info(f"💡 找到 {len(matches)} 筆符合資料，請選擇：")
-                    selected_match = st.selectbox("請選擇正確的客戶", matches, index=0, label_visibility="collapsed")
-                    if selected_match:
-                        target_str = selected_match
-
-                if target_str:
                     try:
                         split_idx = target_str.rfind(" (")
                         found_client = target_str[:split_idx]
                         found_cat = target_str[split_idx+2:-1]
                         
-                        # 搜尋結果直接強制覆寫 session state
                         if found_cat not in company_dict: company_dict[found_cat] = []
                         if found_client not in company_dict[found_cat]: company_dict[found_cat].append(found_client)
                         
                         st.session_state['force_cat'] = found_cat
                         st.session_state['force_client'] = found_client
                         
-                        # 🔥 修改處：搜尋後也清除 box 狀態，讓 force_cat 生效
                         if 'cat_box' in st.session_state: del st.session_state['cat_box']
                         if 'client_box' in st.session_state: del st.session_state['client_box']
                         
                         st.rerun()
-
                     except: pass
-            
-            # ==========================================
+                elif len(matches) > 1:
+                     st.info(f"💡 找到 {len(matches)} 筆符合資料，請在下方選單選取。")
 
             st.markdown("---")
             c1, c2 = st.columns(2)
             with c1:
                 input_date = st.date_input("📅 填表日期", def_date)
                 
-                # 準備下拉選單的選項
                 current_cat_opts = list(company_dict.keys()) + ["➕ 新增類別..."]
-                
-                # 決定預設選取項 (Index)
-                # 優先級：搜尋結果 (force_cat) > 編輯資料 (edit_data) > 預設 (0)
                 
                 final_cat_idx = 0
                 target_cat = None
@@ -469,17 +424,13 @@ def main():
                 elif is_edit and '客戶類別' in edit_data:
                     target_cat = str(edit_data['客戶類別']).strip()
                 
-                # 確保目標類別存在於選項中，否則 index 會報錯
                 if target_cat and target_cat not in current_cat_opts:
                     current_cat_opts.insert(0, target_cat)
-                
                 if target_cat in current_cat_opts:
                     final_cat_idx = current_cat_opts.index(target_cat)
 
-                # 客戶類別選單
                 selected_cat = st.selectbox("📂 客戶類別", current_cat_opts, index=final_cat_idx, key="cat_box")
                 
-                # 處理客戶名稱清單
                 if selected_cat == "➕ 新增類別...":
                     final_cat = st.text_input("✍️ 請輸入新類別名稱")
                     client_opts = ["➕ 新增客戶..."]
@@ -487,7 +438,6 @@ def main():
                     final_cat = selected_cat
                     client_opts = company_dict.get(selected_cat, []) + ["➕ 新增客戶..."]
 
-                # 決定客戶名稱 Index
                 final_client_idx = 0
                 target_client = None
                 
@@ -498,11 +448,9 @@ def main():
                 
                 if target_client and target_client not in client_opts:
                     client_opts.insert(0, target_client)
-                    
                 if target_client in client_opts:
                     final_client_idx = client_opts.index(target_client)
 
-                # 客戶名稱選單
                 selected_client = st.selectbox("👤 客戶名稱", client_opts, index=final_client_idx, key="client_box")
                 
                 if selected_client == "➕ 新增客戶...":
@@ -515,7 +463,7 @@ def main():
                     current_id = edit_data.get('編號')
                     st.metric(label="✨ 編輯案件編號", value=f"No. {current_id}")
                 else:
-                    # 🔥 修改處：這裡將 input_date.year 傳入新的計算函式
+                    # 使用新的嚴格邏輯
                     next_id = calculate_next_id(df_business, input_date.year)
                     st.metric(label=f"✨ {input_date.year} 新案件編號", value=f"No. {next_id}", delta="Auto")
 
@@ -644,14 +592,13 @@ def main():
                         st.balloons()
                         st.success(" | ".join(msg_list))
                         
-                        # 清除狀態
                         st.session_state['ex_res'] = ""
                         st.session_state['inv_list'] = []
                         st.session_state['pay_list'] = []
                         st.session_state['edit_mode'] = False
                         st.session_state['edit_data'] = {}
                         st.session_state['search_input'] = ""
-                        # 清除 box，確保下次進入新增模式時重置
+                        
                         if 'cat_box' in st.session_state: del st.session_state['cat_box']
                         if 'client_box' in st.session_state: del st.session_state['client_box']
                         
@@ -688,7 +635,7 @@ def main():
                 
                 df_final = df_valid[df_valid['Year'] == selected_year].sort_values(by='parsed_date', ascending=False)
                 
-                # --- KPI ---
+                # KPI
                 total_rev = df_final[price_col].sum() if price_col else 0
                 st.markdown(f"### 📊 {selected_year} 年度總覽")
                 k1, k2, k3 = st.columns(3)
@@ -697,7 +644,6 @@ def main():
                 avg = total_rev/len(df_final) if len(df_final) > 0 else 0
                 k3.metric("平均客單價", f"${avg:,.0f}")
                 
-                # --- 圖表區 ---
                 st.markdown("---")
                 c_chart1, c_chart2 = st.columns(2)
                 
@@ -727,14 +673,18 @@ def main():
                 
                 st.markdown("---")
 
-                # --- 詳細資料列表 ---
+                # --- 🔥【關鍵修正】表格顯示區 ---
                 st.subheader(f"📝 {selected_year} 詳細資料")
-                st.warning("💡 **操作提示：** 請直接點選表格中的任一列，系統將自動跳轉至編輯頁面並帶入該筆資料。")
+                st.warning("💡 **注意：** 點選表格可編輯。若發現 2026 有編號 74 的資料，請務必至 Google Sheet 刪除，讓編號重置為 1。")
 
-                display_cols = [c for c in df_final.columns if c not in ['Year', 'parsed_date']]
+                # 強制指定顯示順序，確保 2026 跟 2025 長一樣
+                target_cols = ["編號", "日期", "客戶類別", "客戶名稱", "案號", "完稅價格", "預定交期", "出貨日期", "發票日期", "收款日期", "備註"]
+                
+                # 檢查哪些欄位真的存在於資料中，避免報錯
+                valid_cols = [c for c in target_cols if c in df_final.columns]
                 
                 selection = st.dataframe(
-                    df_final[display_cols],
+                    df_final[valid_cols],  # 只顯示標準欄位
                     use_container_width=True,
                     on_select="rerun",
                     selection_mode="single-row",
@@ -743,6 +693,7 @@ def main():
 
                 if selection and selection["selection"]["rows"]:
                     selected_index = selection["selection"]["rows"][0]
+                    # 注意：這裡要回到 df_final 取值，不能只取 valid_cols 的
                     selected_row = df_final.iloc[selected_index]
                     
                     row_dict = selected_row.to_dict()
@@ -754,13 +705,10 @@ def main():
                     st.session_state['edit_data'] = row_dict
                     st.session_state['current_page'] = "📝 新增業務登記"
                     
-                    # 🔥 修改處 (關鍵修正)：
-                    # 在跳轉前，刪除 'cat_box' 和 'client_box' 的 session_state
-                    # 這樣下一頁的 selectbox 才會乖乖讀取 index 參數，而不是死守舊值
+                    # 清除選擇狀態，解決選單跑掉問題
                     if 'cat_box' in st.session_state: del st.session_state['cat_box']
                     if 'client_box' in st.session_state: del st.session_state['client_box']
 
-                    # 強制設定 force 值 (其實有上面的 delete，這裡已經不需要 force，但為了雙重保險保留邏輯)
                     if '客戶類別' in row_dict:
                         st.session_state['force_cat'] = str(row_dict['客戶類別']).strip()
                     if '客戶名稱' in row_dict:
