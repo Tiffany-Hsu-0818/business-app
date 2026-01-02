@@ -73,11 +73,16 @@ def clean_headers(headers):
     return cleaned
 
 def parse_taiwan_date(date_str):
+    """
+    通用日期解析：用於顯示與編輯時的寬鬆解析
+    注意：如果只有兩碼 (如 12/05)，會預設為今年。
+    """
     if pd.isna(date_str) or str(date_str).strip() == "": return pd.NaT
     s = str(date_str).split(',')[0].strip().replace(".", "/")
     try:
         parts = s.split('/')
         if len(parts) == 2:
+            # ⚠️ 這裡會使用當下年份，對於舊資料分析需小心使用
             this_year = datetime.now().year
             return pd.to_datetime(f"{this_year}-{parts[0]}-{parts[1]}")
         elif len(parts) == 3:
@@ -103,6 +108,7 @@ def load_data_from_gsheet():
                         headers = clean_headers(data[0])
                         df = pd.DataFrame(data[1:], columns=headers)
                         df = df.replace(r'^\s*$', pd.NA, regex=True).dropna(how='all')
+                        # 加入 .strip() 確保去除前後空白
                         cd = {col: [str(x).strip() for x in df[col].values if pd.notna(x) and str(x).strip()] for col in df.columns}
                     else: cd = {}
                 else: cd = {}
@@ -235,37 +241,42 @@ def smart_save_record(data_dict, is_update=False):
 
 def calculate_next_id(df_all, target_year):
     """
-    修正後的編號計算邏輯：
-    1. 找出日期欄位並解析出年份
-    2. 篩選出屬於 target_year 的資料
-    3. 只取該年份的最大編號 + 1，若是新的一年則回傳 1
+    🔥 修正版編號計算邏輯：
+    1. 嚴格解析日期：【必須】包含年份 (3個部分)，忽略只有月/日的簡寫。
+       避免將舊資料的 "12/05" 誤判為今年的 "2026-12-05"。
+    2. 篩選年份。
+    3. 取最大值 + 1。
     """
     if df_all.empty: return 1
     if '編號' not in df_all.columns: return 1
 
-    # 找出日期欄位
     date_col = next((c for c in df_all.columns if '日期' in c), None)
-    if not date_col:
-        return 1
+    if not date_col: return 1
 
     try:
-        # 建立一個臨時 DataFrame 來處理，避免影響原始資料
         df_temp = df_all[['編號', date_col]].copy()
-        
-        # 轉數字，無法轉的變 NaN
         df_temp['id_num'] = pd.to_numeric(df_temp['編號'], errors='coerce')
         
-        # 解析日期取得年份
-        def get_year(x):
-            d = parse_taiwan_date(x)
-            return d.year if d is not pd.NaT else None
-            
-        df_temp['year_num'] = df_temp[date_col].apply(get_year)
+        # 定義嚴格的年份解析函式
+        def get_strict_year(x):
+            if pd.isna(x) or str(x).strip() == "": return None
+            s = str(x).strip().replace(".", "/").replace("-", "/")
+            parts = s.split('/')
+            # 只有當長度為 3 (年/月/日) 時才採納，長度為 2 (月/日) 視為無效年份，避免誤判
+            if len(parts) == 3:
+                try:
+                    year_val = int(parts[0])
+                    # 處理民國年
+                    if year_val < 1911: year_val += 1911
+                    return year_val
+                except: return None
+            return None
+
+        df_temp['year_num'] = df_temp[date_col].apply(get_strict_year)
         
         # 篩選該年份資料
         df_year_filtered = df_temp[df_temp['year_num'] == target_year]
         
-        # 取得最大值
         ids = df_year_filtered['id_num'].dropna()
         if ids.empty: return 1
         return int(ids.max()) + 1
@@ -300,6 +311,8 @@ def main():
             st.session_state['current_page'] = "📝 新增業務登記"
             st.session_state['edit_mode'] = False
             st.session_state['edit_data'] = {}
+            # 切換回新增模式時，清空搜尋欄與暫存，避免干擾
+            st.session_state['search_input'] = "" 
             st.session_state['inv_list'] = []
             st.session_state['pay_list'] = []
             st.rerun()
@@ -327,7 +340,6 @@ def main():
         
         form_title = f"📝 編輯紀錄 (No.{edit_data.get('編號')})" if is_edit else "📝 新增業務登記"
         
-        # 如果是編輯模式，顯示明顯的提示框
         if is_edit:
             st.success(f"✏️ 您正在編輯 **No.{edit_data.get('編號')}** 的資料，修改完畢請按下方「更新資料」按鈕。")
         else:
@@ -366,21 +378,19 @@ def main():
             st.markdown("### 🏢 客戶與基本資料")
             
             # ==========================================
-            # 🔍 功能 1 改良：搜尋結果強制覆寫下拉選單
+            # 🔍 搜尋邏輯
             # ==========================================
             def normalize_text(text):
-                """將所有 '臺' 轉為 '台' 以便比對"""
                 return str(text).replace('臺', '台').strip()
 
             search_keyword = st.text_input("🔍 快速搜尋客戶 (輸入後按 Enter)", placeholder="例如：台積 (支援台/臺互通)", key="search_input")
             
             found_cat, found_client = None, None
 
+            # 只有當搜尋欄有值時，才進行搜尋覆蓋邏輯
             if search_keyword:
                 norm_key = normalize_text(search_keyword)
                 matches = []
-                
-                # 搜尋所有符合的結果
                 for cat, clients in company_dict.items():
                     for client in clients:
                         if norm_key in normalize_text(client):
@@ -398,7 +408,6 @@ def main():
                     if selected_match:
                         target_str = selected_match
 
-                # 解析並【強制更新】下拉選單狀態
                 if target_str:
                     try:
                         split_idx = target_str.rfind(" (")
@@ -428,16 +437,14 @@ def main():
                 # 類別清單
                 current_cat_opts = list(company_dict.keys()) + ["➕ 新增類別..."]
                 
-                # 若無搜尋結果，嘗試使用編輯資料
-                if not found_cat:
-                    target_cat = edit_data.get('客戶類別') if is_edit else None
-                    if target_cat in current_cat_opts:
-                        try:
-                            # 這裡只做初始設定，若 session state 已有值 (例如搜尋過)，streamlit 會優先使用 session state
-                            def_cat_idx = current_cat_opts.index(target_cat)
-                        except: pass
+                # 🔥 修正重點：確保下拉選單能正確接收 session_state 的值
+                # 這裡不使用 default index 計算，完全依賴 st.session_state['cat_box']
+                # 如果 'cat_box' 不在選項中（例如舊資料的類別），自動加入選項避免報錯
                 
-                # 注意：這裡使用 key='cat_box'，數值會由 session state 控制
+                current_cat_val = st.session_state.get('cat_box')
+                if current_cat_val and current_cat_val not in current_cat_opts:
+                     current_cat_opts.insert(0, current_cat_val)
+                
                 selected_cat = st.selectbox("📂 客戶類別", current_cat_opts, key="cat_box")
                 
                 if selected_cat == "➕ 新增類別...":
@@ -447,7 +454,11 @@ def main():
                     final_cat = selected_cat
                     client_opts = company_dict.get(selected_cat, []) + ["➕ 新增客戶..."]
 
-                # 注意：這裡使用 key='client_box'
+                # 同樣處理客戶名稱
+                current_client_val = st.session_state.get('client_box')
+                if current_client_val and current_client_val not in client_opts:
+                    client_opts.insert(0, current_client_val)
+
                 selected_client = st.selectbox("👤 客戶名稱", client_opts, key="client_box")
                 
                 if selected_client == "➕ 新增客戶...":
@@ -460,7 +471,6 @@ def main():
                     current_id = edit_data.get('編號')
                     st.metric(label="✨ 編輯案件編號", value=f"No. {current_id}")
                 else:
-                    # 使用更新後的計算邏輯
                     next_id = calculate_next_id(df_business, input_date.year)
                     st.metric(label=f"✨ {input_date.year} 新案件編號", value=f"No. {next_id}", delta="Auto")
 
@@ -594,6 +604,7 @@ def main():
                         st.session_state['pay_list'] = []
                         st.session_state['edit_mode'] = False
                         st.session_state['edit_data'] = {}
+                        st.session_state['search_input'] = "" # 儲存後清空搜尋
                         
                         st.cache_data.clear()
                         time.sleep(2)
@@ -637,7 +648,7 @@ def main():
                 avg = total_rev/len(df_final) if len(df_final) > 0 else 0
                 k3.metric("平均客單價", f"${avg:,.0f}")
                 
-                # --- 圖表區 (已加回) ---
+                # --- 圖表區 ---
                 st.markdown("---")
                 c_chart1, c_chart2 = st.columns(2)
                 
@@ -655,8 +666,6 @@ def main():
                 with c_chart2:
                     st.subheader("📅 每月業績趨勢")
                     if price_col and 'parsed_date' in df_final.columns:
-                        # 依月份分組統計
-                        # 使用 M 代表月底 (Month End)，避免未來版本警告
                         df_monthly = df_final.resample('M', on='parsed_date')[price_col].sum().reset_index()
                         df_monthly['Month_Str'] = df_monthly['parsed_date'].dt.strftime('%Y-%m')
                         
@@ -673,7 +682,9 @@ def main():
 
                 # --- 詳細資料列表 (點選編輯功能) ---
                 st.subheader(f"📝 {selected_year} 詳細資料")
-                st.info("💡 **操作提示：** 請直接點選表格中的任一列，系統將自動跳轉至編輯頁面並帶入資料。")
+                
+                # 🔥 修正重點：使用更明顯的警告框來提示操作
+                st.warning("💡 **操作提示：** 請直接點選表格中的任一列，系統將自動跳轉至編輯頁面並帶入該筆資料。")
 
                 display_cols = [c for c in df_final.columns if c not in ['Year', 'parsed_date']]
                 
@@ -698,12 +709,15 @@ def main():
                     st.session_state['edit_data'] = row_dict
                     st.session_state['current_page'] = "📝 新增業務登記"
                     
-                    # 🔴 關鍵修正：強制更新 Session State 中的下拉選單值
-                    # 這樣跳轉過去時，Selectbox 才會顯示正確的舊資料
+                    # 🔥 關鍵修正：
+                    # 1. 強制清空搜尋欄，防止搜尋狀態覆蓋了編輯資料
+                    st.session_state['search_input'] = ""
+                    
+                    # 2. 強制更新 Session State 中的下拉選單值，並使用 .strip() 去除空白誤差
                     if '客戶類別' in row_dict:
-                        st.session_state['cat_box'] = row_dict['客戶類別']
+                        st.session_state['cat_box'] = str(row_dict['客戶類別']).strip()
                     if '客戶名稱' in row_dict:
-                        st.session_state['client_box'] = row_dict['客戶名稱']
+                        st.session_state['client_box'] = str(row_dict['客戶名稱']).strip()
                         
                     st.rerun()
             else:
