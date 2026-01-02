@@ -94,6 +94,7 @@ def load_data_from_gsheet():
             client = get_google_sheet_client()
             sh = client.open_by_key(SPREADSHEET_KEY)
             
+            # 讀取公司名單
             try:
                 ws_c = sh.get_worksheet(1)
                 if ws_c:
@@ -107,6 +108,7 @@ def load_data_from_gsheet():
                 else: cd = {}
             except: cd = {}
 
+            # 讀取業務紀錄
             try:
                 ws_f = sh.get_worksheet(0)
                 if ws_f:
@@ -232,10 +234,39 @@ def smart_save_record(data_dict, is_update=False):
     return False, "連線逾時"
 
 def calculate_next_id(df_all, target_year):
+    """
+    修正後的編號計算邏輯：
+    1. 找出日期欄位並解析出年份
+    2. 篩選出屬於 target_year 的資料
+    3. 只取該年份的最大編號 + 1，若是新的一年則回傳 1
+    """
     if df_all.empty: return 1
     if '編號' not in df_all.columns: return 1
+
+    # 找出日期欄位
+    date_col = next((c for c in df_all.columns if '日期' in c), None)
+    if not date_col:
+        return 1
+
     try:
-        ids = pd.to_numeric(df_all['編號'], errors='coerce').dropna()
+        # 建立一個臨時 DataFrame 來處理，避免影響原始資料
+        df_temp = df_all[['編號', date_col]].copy()
+        
+        # 轉數字，無法轉的變 NaN
+        df_temp['id_num'] = pd.to_numeric(df_temp['編號'], errors='coerce')
+        
+        # 解析日期取得年份
+        def get_year(x):
+            d = parse_taiwan_date(x)
+            return d.year if d is not pd.NaT else None
+            
+        df_temp['year_num'] = df_temp[date_col].apply(get_year)
+        
+        # 篩選該年份資料
+        df_year_filtered = df_temp[df_temp['year_num'] == target_year]
+        
+        # 取得最大值
+        ids = df_year_filtered['id_num'].dropna()
         if ids.empty: return 1
         return int(ids.max()) + 1
     except: return 1
@@ -295,11 +326,13 @@ def main():
         edit_data = st.session_state.get('edit_data', {})
         
         form_title = f"📝 編輯紀錄 (No.{edit_data.get('編號')})" if is_edit else "📝 新增業務登記"
-        st.subheader(form_title)
         
+        # 如果是編輯模式，顯示明顯的提示框
         if is_edit:
-            st.info("💡 目前為編輯模式。修改完畢請按下方「更新資料」按鈕。")
-
+            st.success(f"✏️ 您正在編輯 **No.{edit_data.get('編號')}** 的資料，修改完畢請按下方「更新資料」按鈕。")
+        else:
+            st.subheader(form_title)
+        
         # 預設值
         def_date = datetime.today()
         def_project = ""
@@ -404,6 +437,7 @@ def main():
                             def_cat_idx = current_cat_opts.index(target_cat)
                         except: pass
                 
+                # 注意：這裡使用 key='cat_box'，數值會由 session state 控制
                 selected_cat = st.selectbox("📂 客戶類別", current_cat_opts, key="cat_box")
                 
                 if selected_cat == "➕ 新增類別...":
@@ -413,6 +447,7 @@ def main():
                     final_cat = selected_cat
                     client_opts = company_dict.get(selected_cat, []) + ["➕ 新增客戶..."]
 
+                # 注意：這裡使用 key='client_box'
                 selected_client = st.selectbox("👤 客戶名稱", client_opts, key="client_box")
                 
                 if selected_client == "➕ 新增客戶...":
@@ -425,6 +460,7 @@ def main():
                     current_id = edit_data.get('編號')
                     st.metric(label="✨ 編輯案件編號", value=f"No. {current_id}")
                 else:
+                    # 使用更新後的計算邏輯
                     next_id = calculate_next_id(df_business, input_date.year)
                     st.metric(label=f"✨ {input_date.year} 新案件編號", value=f"No. {next_id}", delta="Auto")
 
@@ -636,8 +672,8 @@ def main():
                 st.markdown("---")
 
                 # --- 詳細資料列表 (點選編輯功能) ---
-                st.subheader(f"📝 {selected_year} 詳細資料 (點選列可編輯)")
-                st.info("💡 提示：**點選** 表格中的某一列，即可跳轉至編輯頁面修改資料。")
+                st.subheader(f"📝 {selected_year} 詳細資料")
+                st.info("💡 **操作提示：** 請直接點選表格中的任一列，系統將自動跳轉至編輯頁面並帶入資料。")
 
                 display_cols = [c for c in df_final.columns if c not in ['Year', 'parsed_date']]
                 
@@ -661,6 +697,14 @@ def main():
                     st.session_state['edit_mode'] = True
                     st.session_state['edit_data'] = row_dict
                     st.session_state['current_page'] = "📝 新增業務登記"
+                    
+                    # 🔴 關鍵修正：強制更新 Session State 中的下拉選單值
+                    # 這樣跳轉過去時，Selectbox 才會顯示正確的舊資料
+                    if '客戶類別' in row_dict:
+                        st.session_state['cat_box'] = row_dict['客戶類別']
+                    if '客戶名稱' in row_dict:
+                        st.session_state['client_box'] = row_dict['客戶名稱']
+                        
                     st.rerun()
             else:
                 st.error("資料表中找不到日期欄位，無法分析。")
