@@ -42,6 +42,7 @@ def get_google_sheet_client():
                 if os.path.exists(local_key_file):
                     creds = ServiceAccountCredentials.from_json_keyfile_name(local_key_file, scope)
                 else:
+                    # 備用路徑 (依據您的環境設定)
                     local_key_file_old = r'C:\Users\User\Desktop\業務登記表\service_account.json'
                     if os.path.exists(local_key_file_old):
                         creds = ServiceAccountCredentials.from_json_keyfile_name(local_key_file_old, scope)
@@ -74,8 +75,8 @@ def clean_headers(headers):
 
 def parse_taiwan_date(date_str):
     """
-    🔥【修正】強化版日期解析
-    可以處理 "2024/01/01" 或 "2024/01/01, 2024/02/02" (取第一個)
+    強化版日期解析
+    處理 "2024/01/01" 或 "113/01/01"
     """
     if pd.isna(date_str) or str(date_str).strip() == "": return pd.NaT
     # 只取逗號前的第一段，並統一分隔符
@@ -132,11 +133,9 @@ def load_data_from_gsheet():
                         headers = clean_headers(all_values[header_idx])
                         df_b = pd.DataFrame(all_values[header_idx+1:], columns=headers)
                         
-                        # 🔥【修正重點 1】記錄每筆資料在 Google Sheet 的「絕對行號」
-                        # header_idx 是標題列在 all_values 的索引 (0-based)
-                        # 資料是從 header_idx + 1 開始抓
-                        # Excel 行號 = (header_idx + 1 [標題行]) + 1 [Excel從1開始] + index + 1 [資料行起點]
-                        # 簡化公式： df index + header_idx + 2
+                        # 記錄每筆資料在 Google Sheet 的「絕對行號」 (1-based)
+                        # 公式: header_idx(0-based) + 1(轉Excel行號) + 1(標題佔一行) + df索引 + 1(df索引從0開始)
+                        # 簡化: header_idx + 2 + index
                         df_b['Thinking_Row_Index'] = df_b.index + header_idx + 2
 
                         if '編號' in df_b.columns:
@@ -202,7 +201,7 @@ def update_company_category_in_sheet(client_name, new_category):
 
 def smart_save_record(data_dict, is_update=False, target_row_idx=None):
     """
-    🔥【修正重點 2】安全版儲存函式
+    安全版儲存函式
     新增參數: target_row_idx (絕對行號)，用於編輯模式下精準定位。
     """
     for attempt in range(3):
@@ -230,18 +229,15 @@ def smart_save_record(data_dict, is_update=False, target_row_idx=None):
             target_id = str(data_dict.get("編號"))
 
             if is_update:
-                # 🔥 安全檢查：更新模式下，若沒有行號，絕對不允許寫入，防止覆蓋錯誤資料
                 if not target_row_idx:
                     return False, "❌ 系統錯誤：遺失資料行號 (Row Index)，無法安全更新。"
                 
                 try:
-                    # 使用 A+行號 直接定位，例如 "A105"
                     ws.update(f"A{target_row_idx}", [row_to_write], value_input_option='USER_ENTERED')
                     return True, f"編號 {target_id} 更新成功"
                 except Exception as ex:
                     return False, f"更新失敗: {str(ex)}"
             else:
-                # 新增模式：直接 Append 到最後
                 ws.append_row(row_to_write, value_input_option='USER_ENTERED')
                 return True, f"編號 {target_id} 新增成功"
 
@@ -252,32 +248,46 @@ def smart_save_record(data_dict, is_update=False, target_row_idx=None):
 
 def calculate_next_id(df_all, target_year):
     """
-    🔥【修正重點 3】依照「年份」計算下一個編號
+    ✅【修正版】依照「年份」獨立計算下一個編號
+    已修正：不會再受到其他年份編號的影響 (如 2024年的73 不會影響 2026年)
     """
+    # 1. 基本防呆
     if df_all.empty: return 1
     if '編號' not in df_all.columns: return 1
     
     try:
-        # 建立副本以免影響原始資料
+        # 2. 建立副本以免影響原始資料
         df_temp = df_all.copy()
         
-        # 尋找日期欄位
+        # 3. 尋找日期欄位
         date_col = next((c for c in df_temp.columns if '日期' in c and '發票' not in c), None)
         if not date_col: return 1
         
-        # 使用修正後的解析函式提取年份
+        # 4. 解析日期並提取年份
         df_temp['temp_date'] = df_temp[date_col].apply(parse_taiwan_date)
         df_temp['temp_year'] = df_temp['temp_date'].dt.year
         
-        # 🔥 關鍵：只篩選該年份的資料
+        # 5. 🔥【關鍵修正】只篩選出「目標年份」的資料
+        # 例如：如果是 2026，就只看 2026 的資料
         df_year = df_temp[df_temp['temp_year'] == target_year]
         
-        if df_year.empty: return 1
+        # 6. 如果該年份沒有任何資料，直接回傳 1
+        if df_year.empty:
+            return 1
         
+        # 7. 如果有資料，計算最大值 + 1
+        # 先轉成數字，濾掉非數字的編號
         ids = pd.to_numeric(df_year['編號'], errors='coerce').dropna()
-        if ids.empty: return 1
-        return int(ids.max()) + 1
-    except: return 1
+        
+        if ids.empty:
+            return 1
+        else:
+            return int(ids.max()) + 1
+
+    except Exception as e:
+        # 萬一發生預期外的錯誤，保險起見回傳 1 (或可改為顯示錯誤)
+        print(f"Error calculating ID: {e}")
+        return 1
 
 def get_yahoo_rate(target_currency, query_date, inverse=False):
     try:
@@ -321,6 +331,10 @@ def main():
         if st.button("🔄 強制重新整理"):
             st.cache_data.clear()
             st.rerun()
+            
+        # 簡單除錯工具 (可選)
+        # with st.expander("🕵️ 除錯資訊"):
+        #     st.write(st.session_state)
 
     with st.spinner("資料載入中..."):
         company_dict, df_business = load_data_from_gsheet()
@@ -335,7 +349,6 @@ def main():
         
         if is_edit:
             st.success(f"✏️ 您正在編輯 **No.{edit_data.get('編號')}** 的資料。")
-            # 顯示除錯資訊：確認是否抓到行號
             ridx = edit_data.get('Thinking_Row_Index')
             if ridx:
                 st.caption(f"📍 資料鎖定：Row {ridx}")
@@ -416,7 +429,6 @@ def main():
             with c1:
                 input_date = st.date_input("📅 填表日期", def_date)
                 
-                # 選單
                 current_cat_opts = list(company_dict.keys()) + ["➕ 新增類別..."]
                 
                 if not found_cat:
@@ -442,7 +454,7 @@ def main():
                     current_id = edit_data.get('編號')
                     st.metric(label="✨ 編輯案件編號", value=f"No. {current_id}")
                 else:
-                    # 使用修正後的年份篩選邏輯
+                    # ✅ 呼叫修正後的函式
                     next_id = calculate_next_id(df_business, input_date.year)
                     st.metric(label=f"✨ {input_date.year} 新案件編號", value=f"No. {next_id}", delta="Auto")
 
@@ -555,11 +567,9 @@ def main():
                     "備註": remark
                 }
                 
-                # 🔥 從 edit_data 抓取「絕對行號」
                 save_row_idx = edit_data.get('Thinking_Row_Index') if is_edit else None
 
                 with st.spinner("資料儲存處理中..."):
-                    # 🔥 傳遞行號給儲存函式
                     success, msg = smart_save_record(data_to_save, is_update=is_edit, target_row_idx=save_row_idx)
 
                     if success:
@@ -571,7 +581,6 @@ def main():
                         st.balloons()
                         st.success(" | ".join(msg_list))
                         
-                        # 清空狀態
                         st.session_state['ex_res'] = ""
                         st.session_state['inv_list'] = []
                         st.session_state['pay_list'] = []
@@ -605,7 +614,7 @@ def main():
                 
                 df_final = df_valid[df_valid['Year'] == selected_year].sort_values(by='parsed_date', ascending=False)
                 
-                # --- KPI ---
+                # KPI
                 total_rev = df_final[price_col].sum() if price_col else 0
                 st.markdown(f"### 📊 {selected_year} 年度總覽")
                 k1, k2, k3 = st.columns(3)
@@ -615,7 +624,7 @@ def main():
                 k3.metric("平均客單價", f"${avg:,.0f}")
                 st.divider()
 
-                # --- Charts ---
+                # Charts
                 c_chart1, c_chart2 = st.columns(2)
                 with c_chart1:
                     st.subheader("📈 客戶類別佔比")
@@ -635,9 +644,8 @@ def main():
                 st.subheader(f"📝 {selected_year} 詳細資料 (點選列可編輯)")
                 st.info("💡 提示：**點選** 表格中的某一列，即可跳轉至編輯頁面修改資料。")
 
-                display_cols = [c for c in df_final.columns if c not in ['Year', 'parsed_date']]
+                display_cols = [c for c in df_final.columns if c not in ['Year', 'parsed_date', 'Thinking_Row_Index']]
                 
-                # 這裡顯示的表格不包含行號以保持美觀，但行號仍保留在 df_final 中
                 selection = st.dataframe(
                     df_final[display_cols],
                     use_container_width=True,
@@ -651,7 +659,6 @@ def main():
                     selected_row = df_final.iloc[selected_index]
 
                     row_dict = selected_row.to_dict()
-                    # 日期格式化，避免 Timestamp 物件導致的 JSON 序列化錯誤
                     for k, v in row_dict.items():
                         if isinstance(v, (pd.Timestamp, datetime)):
                             row_dict[k] = v.strftime('%Y-%m-%d')
