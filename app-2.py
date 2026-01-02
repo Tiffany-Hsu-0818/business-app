@@ -42,7 +42,7 @@ def get_google_sheet_client():
                 if os.path.exists(local_key_file):
                     creds = ServiceAccountCredentials.from_json_keyfile_name(local_key_file, scope)
                 else:
-                    # 備用路徑 (依據您的環境設定)
+                    # 備用路徑
                     local_key_file_old = r'C:\Users\User\Desktop\業務登記表\service_account.json'
                     if os.path.exists(local_key_file_old):
                         creds = ServiceAccountCredentials.from_json_keyfile_name(local_key_file_old, scope)
@@ -133,9 +133,7 @@ def load_data_from_gsheet():
                         headers = clean_headers(all_values[header_idx])
                         df_b = pd.DataFrame(all_values[header_idx+1:], columns=headers)
                         
-                        # 記錄每筆資料在 Google Sheet 的「絕對行號」 (1-based)
-                        # 公式: header_idx(0-based) + 1(轉Excel行號) + 1(標題佔一行) + df索引 + 1(df索引從0開始)
-                        # 簡化: header_idx + 2 + index
+                        # 記錄每筆資料在 Google Sheet 的「絕對行號」
                         df_b['Thinking_Row_Index'] = df_b.index + header_idx + 2
 
                         if '編號' in df_b.columns:
@@ -202,7 +200,6 @@ def update_company_category_in_sheet(client_name, new_category):
 def smart_save_record(data_dict, is_update=False, target_row_idx=None):
     """
     安全版儲存函式
-    新增參數: target_row_idx (絕對行號)，用於編輯模式下精準定位。
     """
     for attempt in range(3):
         try:
@@ -249,43 +246,34 @@ def smart_save_record(data_dict, is_update=False, target_row_idx=None):
 def calculate_next_id(df_all, target_year):
     """
     ✅【修正版】依照「年份」獨立計算下一個編號
-    已修正：不會再受到其他年份編號的影響 (如 2024年的73 不會影響 2026年)
     """
-    # 1. 基本防呆
     if df_all.empty: return 1
     if '編號' not in df_all.columns: return 1
     
     try:
-        # 2. 建立副本以免影響原始資料
+        # 建立副本以免影響原始資料
         df_temp = df_all.copy()
         
-        # 3. 尋找日期欄位
+        # 尋找日期欄位
         date_col = next((c for c in df_temp.columns if '日期' in c and '發票' not in c), None)
         if not date_col: return 1
         
-        # 4. 解析日期並提取年份
+        # 解析日期並提取年份
         df_temp['temp_date'] = df_temp[date_col].apply(parse_taiwan_date)
         df_temp['temp_year'] = df_temp['temp_date'].dt.year
         
-        # 5. 🔥【關鍵修正】只篩選出「目標年份」的資料
-        # 例如：如果是 2026，就只看 2026 的資料
+        # 🔥【關鍵修正】只篩選出「目標年份」的資料
         df_year = df_temp[df_temp['temp_year'] == target_year]
         
-        # 6. 如果該年份沒有任何資料，直接回傳 1
         if df_year.empty:
             return 1
         
-        # 7. 如果有資料，計算最大值 + 1
-        # 先轉成數字，濾掉非數字的編號
+        # 計算最大值 + 1
         ids = pd.to_numeric(df_year['編號'], errors='coerce').dropna()
-        
-        if ids.empty:
-            return 1
-        else:
-            return int(ids.max()) + 1
+        if ids.empty: return 1
+        return int(ids.max()) + 1
 
     except Exception as e:
-        # 萬一發生預期外的錯誤，保險起見回傳 1 (或可改為顯示錯誤)
         print(f"Error calculating ID: {e}")
         return 1
 
@@ -331,13 +319,31 @@ def main():
         if st.button("🔄 強制重新整理"):
             st.cache_data.clear()
             st.rerun()
-            
-        # 簡單除錯工具 (可選)
-        # with st.expander("🕵️ 除錯資訊"):
-        #     st.write(st.session_state)
 
     with st.spinner("資料載入中..."):
         company_dict, df_business = load_data_from_gsheet()
+
+    # ==========================================
+    # 🕵️ 抓鬼偵錯區 (整合版)
+    # ==========================================
+    # 這裡會自動檢查有沒有 2026 年(或未來)的資料導致編號跳號
+    debug_date_col = next((c for c in df_business.columns if '日期' in c and '發票' not in c), None)
+    
+    if debug_date_col and not df_business.empty:
+        df_debug = df_business.copy()
+        df_debug['解析後日期'] = df_debug[debug_date_col].apply(parse_taiwan_date)
+        df_debug['判定年份'] = df_debug['解析後日期'].dt.year
+        
+        # 抓出 2026 年以後的資料
+        ghost_rows = df_debug[df_debug['判定年份'] >= 2026]
+        
+        if not ghost_rows.empty:
+            with st.expander("⚠️ 系統偵測到 2026 年已有資料！(點擊展開查看)", expanded=True):
+                st.error(f"系統發現 {len(ghost_rows)} 筆資料被判定為 2026 年，因此編號無法從 1 開始。")
+                st.write("請根據下表的 `Thinking_Row_Index` (Excel 行號)，回到 Google Sheet 刪除或修改這些資料：")
+                # 顯示關鍵欄位供使用者對照
+                st.dataframe(ghost_rows[['Thinking_Row_Index', '編號', debug_date_col, '解析後日期', '客戶名稱']])
+    # ==========================================
 
     if st.session_state['current_page'] == "📝 新增業務登記":
         
@@ -454,7 +460,6 @@ def main():
                     current_id = edit_data.get('編號')
                     st.metric(label="✨ 編輯案件編號", value=f"No. {current_id}")
                 else:
-                    # ✅ 呼叫修正後的函式
                     next_id = calculate_next_id(df_business, input_date.year)
                     st.metric(label=f"✨ {input_date.year} 新案件編號", value=f"No. {next_id}", delta="Auto")
 
