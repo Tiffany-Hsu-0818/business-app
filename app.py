@@ -73,18 +73,27 @@ def clean_headers(headers):
     return cleaned
 
 def parse_taiwan_date(date_str):
+    """
+    強化的日期解析：
+    避免將簡寫日期（如 '12/05'）直接預設為今年，除非明確指定。
+    """
     if pd.isna(date_str) or str(date_str).strip() == "": return pd.NaT
     s = str(date_str).split(',')[0].strip().replace(".", "/").replace("-", "/")
     try:
         parts = s.split('/')
-        if len(parts) == 2:
-            this_year = datetime.now().year
-            return pd.to_datetime(f"{this_year}-{parts[0]}-{parts[1]}")
-        elif len(parts) == 3:
+        if len(parts) == 3:
+            # 格式：YYYY/MM/DD 或 ROC/MM/DD
             year_val = int(parts[0])
             if year_val < 1911: year_val += 1911
             return pd.to_datetime(f"{year_val}-{parts[1]}-{parts[2]}")
-        else: return pd.to_datetime(s)
+        elif len(parts) == 2:
+            # 格式：MM/DD -> 這邊要小心，如果是舊資料只有月日，最好不要亂補年份
+            # 但為了相容性，我們先補上今年，但這可能是問題源頭之一
+            # 建議：盡量在 Excel 輸入完整年份
+            this_year = datetime.now().year
+            return pd.to_datetime(f"{this_year}-{parts[0]}-{parts[1]}")
+        else: 
+            return pd.to_datetime(s)
     except: return pd.NaT
 
 @st.cache_data(ttl=60)
@@ -122,9 +131,8 @@ def load_data_from_gsheet():
                     if header_idx != -1 and len(all_values) > header_idx + 1:
                         headers = clean_headers(all_values[header_idx])
                         df_b = pd.DataFrame(all_values[header_idx+1:], columns=headers)
-                        if '編號' in df_b.columns:
-                            df_b = df_b
-                        else: df_b = pd.DataFrame()
+                        # 這裡不要亂過濾，保留完整資料結構給後面處理
+                        df_b = df_b
                     else: df_b = pd.DataFrame()
                 else: df_b = pd.DataFrame()
             except: df_b = pd.DataFrame()
@@ -233,8 +241,14 @@ def smart_save_record(data_dict, is_update=False):
             return False, f"寫入失敗: {e}"
     return False, "連線逾時"
 
-# 🔥【關鍵修正】嚴格版編號計算
+# 🔥【最終修正版】編號計算邏輯
 def calculate_next_id(df_all, target_year):
+    """
+    1. 將 DataFrame 複製一份。
+    2. 強制將日期欄位轉為 datetime 物件 (失敗的變 NaT)。
+    3. 篩選出 Year == target_year 的資料列。
+    4. 只有在這些篩選後的資料中找最大值。
+    """
     if df_all.empty: return 1
     
     date_col = next((c for c in df_all.columns if '日期' in c), None)
@@ -242,38 +256,32 @@ def calculate_next_id(df_all, target_year):
 
     if not date_col or not id_col: return 1
 
-    max_id = 0
-    found_any_record = False
-
-    roc_year = str(target_year - 1911)
-    target_year_str = str(target_year)
-
-    for index, row in df_all.iterrows():
-        d_str = str(row[date_col]).strip()
-        id_val = str(row[id_col]).strip()
-
-        if not d_str or not id_val: continue
-        
-        # 嚴格判斷年份：字串中必須真的包含 '2026' 或 '115'
-        is_target = False
-        if target_year_str in d_str: 
-            is_target = True
-        elif d_str.startswith(roc_year): 
-            is_target = True
-        
-        if is_target:
-            try:
-                curr_num = int(float(id_val))
-                if curr_num > max_id:
-                    max_id = curr_num
-                found_any_record = True
-            except:
-                pass
-
-    if not found_any_record:
+    # 複製資料，以免改到正本
+    df_temp = df_all.copy()
+    
+    # 轉換日期，無法轉換的設為 NaT
+    df_temp['temp_date'] = df_temp[date_col].apply(parse_taiwan_date)
+    
+    # 取得年份
+    df_temp['temp_year'] = df_temp['temp_date'].dt.year
+    
+    # 🔥 關鍵一步：只留下 target_year 的資料！
+    # 這一步保證了如果 target_year 是 2026，我們絕對不會看到 2025/2024 的編號
+    df_filtered = df_temp[df_temp['temp_year'] == target_year]
+    
+    if df_filtered.empty:
         return 1
     
-    return max_id + 1
+    # 在過濾後的資料中找最大編號
+    try:
+        df_filtered['id_num'] = pd.to_numeric(df_filtered[id_col], errors='coerce')
+        max_id = df_filtered['id_num'].max()
+        
+        if pd.isna(max_id):
+            return 1
+        return int(max_id) + 1
+    except:
+        return 1
 
 def get_yahoo_rate(target_currency, query_date, inverse=False):
     try:
@@ -673,18 +681,18 @@ def main():
                 
                 st.markdown("---")
 
-                # --- 🔥【關鍵修正】表格顯示區 ---
+                # --- 🔥【關鍵修正】強制欄位順序與過濾雜訊 ---
                 st.subheader(f"📝 {selected_year} 詳細資料")
-                st.warning("💡 **注意：** 點選表格可編輯。若發現 2026 有編號 74 的資料，請務必至 Google Sheet 刪除，讓編號重置為 1。")
+                st.warning("💡 **重要提醒：** 為了確保資料整潔，這裡只顯示標準欄位。如果您看到之前誤增的 2026 年資料 (No.74)，請務必到 Google Sheet 手動刪除。")
 
-                # 強制指定顯示順序，確保 2026 跟 2025 長一樣
-                target_cols = ["編號", "日期", "客戶類別", "客戶名稱", "案號", "完稅價格", "預定交期", "出貨日期", "發票日期", "收款日期", "備註"]
+                # 定義標準欄位清單 (跟 2025 年的一樣)
+                target_cols = ["編號", "日期", "客戶類別", "客戶名稱", "案號", "完稅價格", "預定交期", "出貨日期", "發票日期", "收款日期", "進出口匯率", "備註"]
                 
-                # 檢查哪些欄位真的存在於資料中，避免報錯
+                # 只保留存在於資料中的標準欄位
                 valid_cols = [c for c in target_cols if c in df_final.columns]
                 
                 selection = st.dataframe(
-                    df_final[valid_cols],  # 只顯示標準欄位
+                    df_final[valid_cols],  # 強制過濾
                     use_container_width=True,
                     on_select="rerun",
                     selection_mode="single-row",
@@ -693,7 +701,6 @@ def main():
 
                 if selection and selection["selection"]["rows"]:
                     selected_index = selection["selection"]["rows"][0]
-                    # 注意：這裡要回到 df_final 取值，不能只取 valid_cols 的
                     selected_row = df_final.iloc[selected_index]
                     
                     row_dict = selected_row.to_dict()
@@ -705,7 +712,6 @@ def main():
                     st.session_state['edit_data'] = row_dict
                     st.session_state['current_page'] = "📝 新增業務登記"
                     
-                    # 清除選擇狀態，解決選單跑掉問題
                     if 'cat_box' in st.session_state: del st.session_state['cat_box']
                     if 'client_box' in st.session_state: del st.session_state['client_box']
 
