@@ -44,10 +44,12 @@ def get_google_sheet_client():
                 key_dict = json.loads(st.secrets["gcp_service_account"]["json_content"])
                 creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
             else:
+                # 建議：在本機開發時，盡量避免硬編碼絕對路徑，使用相對路徑較佳
                 local_key_file = r'service_account.json'
                 if os.path.exists(local_key_file):
                     creds = ServiceAccountCredentials.from_json_keyfile_name(local_key_file, scope)
                 else:
+                    # 這是原本的 Fallback，保留以相容您的環境
                     local_key_file_old = r'C:\Users\User\Desktop\業務登記表\service_account.json'
                     if os.path.exists(local_key_file_old):
                         creds = ServiceAccountCredentials.from_json_keyfile_name(local_key_file_old, scope)
@@ -123,6 +125,7 @@ def load_data_from_gsheet():
             client = get_google_sheet_client()
             sh = client.open_by_key(SPREADSHEET_KEY)
             
+            # 1. 讀取客戶名單 (Worksheet 1)
             try:
                 ws_c = sh.get_worksheet(1)
                 if ws_c:
@@ -136,28 +139,31 @@ def load_data_from_gsheet():
                 else: cd = {}
             except: cd = {}
 
+            # 2. 讀取業務資料表 (Worksheet 0)
             try:
                 ws_f = sh.get_worksheet(0)
                 if ws_f:
                     all_values = ws_f.get_all_values()
                     header_idx = -1
+                    # 尋找標題列
                     for i, row in enumerate(all_values[:10]):
                         r_str = [str(r).strip() for r in row]
-                        # 只要有編號和日期，就是標題列
                         if "編號" in r_str and "日期" in r_str:
                             header_idx = i
                             break
+                    
                     if header_idx != -1 and len(all_values) > header_idx + 1:
                         headers = clean_headers(all_values[header_idx])
                         df_b = pd.DataFrame(all_values[header_idx+1:], columns=headers)
-                        # 🔥 這裡保留原始 Index 以便抓鬼 (Excel Row = Index + header_idx + 2)
-                        # 因為 pandas index 從 0 開始，header 佔 1 行，且通常 Excel 從 1 開始
-                        # header_idx 是標題列在 all_values 的索引 (0-based)
-                        # 真正的 Excel Row = header_idx + 1 (標題行) + index + 1 (資料行) = header_idx + index + 2
+                        
+                        # 🔥【重要】計算每筆資料在 Google Sheet 的真實行號 (Row Index)
+                        # 公式：header_idx (0-based) + 1 (變成 1-based) + 1 (標題佔一行) + df index (0-based) + 1 (Excel row start at 1)
+                        # 簡化後：header_idx + df.index + 2
                         df_b['Thinking_Row_Index'] = df_b.index + header_idx + 2
                     else: df_b = pd.DataFrame()
                 else: df_b = pd.DataFrame()
             except: df_b = pd.DataFrame()
+            
             return cd, df_b
         except Exception as e:
             if "503" in str(e): time.sleep(2); continue
@@ -210,12 +216,20 @@ def update_company_category_in_sheet(client_name, new_category):
     except Exception as e:
         return False, f"更新公司名單失敗: {e}"
 
-def smart_save_record(data_dict, is_update=False):
+def smart_save_record(data_dict, is_update=False, target_row_idx=None):
+    """
+    🔥【安全版儲存函式】
+    參數:
+    - target_row_idx: 這是編輯模式下的「絕對行號」(Thinking_Row_Index)。
+      如果是更新模式 (is_update=True)，這個參數是必須的，否則會拒絕寫入。
+    """
     for attempt in range(3):
         try:
             client = get_google_sheet_client()
             sh = client.open_by_key(SPREADSHEET_KEY)
             ws = sh.get_worksheet(0)
+            
+            # 取得標題列以確定欄位順序
             all_values = ws.get_all_values()
             headers = []
             for i, row in enumerate(all_values[:10]):
@@ -223,39 +237,48 @@ def smart_save_record(data_dict, is_update=False):
                 if "編號" in r_str and "日期" in r_str:
                     headers = row
                     break
+            
             if not headers: return False, "找不到標題列"
 
+            # 建構寫入資料 List
             row_to_write = [""] * len(headers)
             for col_name, value in data_dict.items():
+                # 簡單的 Mapping 邏輯
                 for i, h in enumerate(headers):
                     if str(h).strip() == col_name:
                         row_to_write[i] = str(value)
                         break
             
             target_id = str(data_dict.get("編號"))
+            
             if is_update:
+                # 🚨 修正核心：必須依賴 target_row_idx 進行更新
+                if not target_row_idx:
+                    return False, "❌ 資料安全錯誤：更新模式下未提供原始行號 (Row Index)，系統拒絕寫入以防覆蓋錯誤資料。"
+                
                 try:
-                    id_col_idx = headers.index("編號")
-                    id_list = ws.col_values(id_col_idx + 1)
-                    try:
-                        row_index = id_list.index(target_id) + 1
-                        ws.update(f"A{row_index}", [row_to_write], value_input_option='USER_ENTERED')
-                        return True, f"編號 {target_id} 更新成功"
-                    except ValueError: return False, "找不到原始編號，無法更新"
-                except Exception as ex: return False, str(ex)
+                    # 使用絕對座標更新：例如 A105
+                    # 注意：Gspread 的 update 接受 (range_name, values)
+                    # 這裡 row_to_write 是一個 list，update 需要 list of lists
+                    ws.update(f"A{target_row_idx}", [row_to_write], value_input_option='USER_ENTERED')
+                    return True, f"編號 {target_id} (Row {target_row_idx}) 更新成功"
+                except Exception as ex: 
+                    return False, f"更新失敗: {str(ex)}"
             else:
+                # 新增模式：直接 Append
                 ws.append_row(row_to_write, value_input_option='USER_ENTERED')
                 return True, f"編號 {target_id} 新增成功"
+                
         except Exception as e:
             if "503" in str(e): time.sleep(2); continue
             return False, f"寫入失敗: {e}"
+            
     return False, "連線逾時"
 
 def calculate_next_id_with_debug(df_all, target_year):
     """
     🔥 抓鬼特攻隊版 calculate_next_id
     回傳: (next_id, debug_df)
-    debug_df 包含了所有被判定為該年份的資料，方便使用者檢查。
     """
     if df_all.empty: return 1, pd.DataFrame()
     
@@ -274,16 +297,17 @@ def calculate_next_id_with_debug(df_all, target_year):
     df_temp['temp_date'] = df_temp[date_col].apply(parse_taiwan_date_strict)
     df_temp['temp_year'] = df_temp['temp_date'].dt.year
     
-    # 篩選年份 (找出兇手)
+    # 篩選年份
     df_filtered = df_temp[df_temp['temp_year'] == target_year].copy()
     
-    # 為了顯示，只留重要欄位
-    cols_to_show = ['Thinking_Row_Index', id_col, date_col, '客戶名稱'] if '客戶名稱' in df_temp.columns else ['Thinking_Row_Index', id_col, date_col]
+    cols_to_show = ['Thinking_Row_Index', id_col, date_col]
+    if '客戶名稱' in df_temp.columns: cols_to_show.append('客戶名稱')
     
     if df_filtered.empty:
         return 1, pd.DataFrame()
     
     try:
+        # 強制轉型為數字，忽略非數字的編號
         df_filtered['id_num'] = pd.to_numeric(df_filtered[id_col], errors='coerce')
         max_id = df_filtered['id_num'].max()
         
@@ -294,6 +318,7 @@ def calculate_next_id_with_debug(df_all, target_year):
         return 1, df_filtered[cols_to_show]
 
 def get_yahoo_rate(target_currency, query_date, inverse=False):
+    # (保留原樣)
     try:
         ticker_symbol = f"{target_currency}TWD=X"
         check_date = query_date
@@ -324,10 +349,9 @@ def main():
             st.session_state['edit_data'] = {}
             st.session_state['search_input'] = "" 
             
-            if 'cat_box' in st.session_state: del st.session_state['cat_box']
-            if 'client_box' in st.session_state: del st.session_state['client_box']
-            if 'force_cat' in st.session_state: del st.session_state['force_cat']
-            if 'force_client' in st.session_state: del st.session_state['force_client']
+            # 清除相關狀態
+            for k in ['cat_box', 'client_box', 'force_cat', 'force_client']:
+                if k in st.session_state: del st.session_state[k]
             
             st.rerun()
             
@@ -352,10 +376,16 @@ def main():
         
         if is_edit:
             st.success(f"✏️ 您正在編輯 **No.{edit_data.get('編號')}** 的資料。")
+            # 🔍 Debug 顯示：確保我們有抓到行號
+            row_idx = edit_data.get('Thinking_Row_Index')
+            if row_idx:
+                st.caption(f"📍 鎖定原始資料行號：Row {row_idx}")
+            else:
+                st.error("⚠️ 警告：遺失原始資料行號！儲存可能會失敗。")
         else:
             st.subheader(form_title)
         
-        # 預設值
+        # 預設值設定 (保留您的邏輯)
         def_date = datetime.today()
         def_project = ""
         def_price = 0
@@ -370,7 +400,11 @@ def main():
                 
                 def_project = edit_data.get('案號', "")
                 p_val = str(edit_data.get('完稅價格', "0")).replace(",", "")
-                def_price = int(float(p_val)) if p_val and p_val.replace(".","").isdigit() else 0
+                # 簡單處理金額轉換錯誤
+                try:
+                    def_price = int(float(p_val))
+                except:
+                    def_price = 0
                 def_remark = edit_data.get('備註', "")
                 def_ex_res = edit_data.get('進出口匯率', "")
             except: pass
@@ -379,6 +413,7 @@ def main():
             st.markdown("### 🏢 客戶與基本資料")
             search_keyword = st.text_input("🔍 快速搜尋客戶", placeholder="例如：台積", key="search_input")
             
+            # ... (搜尋邏輯保留) ...
             if search_keyword:
                 def normalize_text(text): return str(text).replace('臺', '台').strip()
                 norm_key = normalize_text(search_keyword)
@@ -443,17 +478,13 @@ def main():
                     current_id = edit_data.get('編號')
                     st.metric(label="✨ 編輯案件編號", value=f"No. {current_id}")
                 else:
-                    # 🔥 抓鬼邏輯：回傳 next_id 和 debug_df
                     next_id, debug_df = calculate_next_id_with_debug(df_business, input_date.year)
                     st.metric(label=f"✨ {input_date.year} 新案件編號", value=f"No. {next_id}", delta="Auto")
                     
                     if next_id > 1:
-                        # 🔥 這裡就是抓鬼雷達
                         st.markdown(f"### 🕵️‍♂️ 資料偵探：為什麼是 {next_id}？")
                         st.error(f"因為系統在您的 Google Sheet 中，發現了以下 **{len(debug_df)} 筆** 屬於 {input_date.year} 年的資料：")
                         st.caption("👇 請看表格最左邊的 **Thinking_Row_Index**，這就是 Google Sheet 的行數。請去把它刪掉！")
-                        
-                        # 顯示嫌疑犯資料表
                         st.dataframe(debug_df, hide_index=True)
 
                 project_no = st.text_input("🔖 案號 / 產品名稱", value=def_project)
@@ -517,8 +548,11 @@ def main():
                     "備註": remark
                 }
                 
+                # 🔥 這裡提取 Row Index
+                save_row_idx = edit_data.get('Thinking_Row_Index') if is_edit else None
+
                 with st.spinner("資料儲存處理中..."):
-                    success, msg = smart_save_record(data_to_save, is_update=is_edit)
+                    success, msg = smart_save_record(data_to_save, is_update=is_edit, target_row_idx=save_row_idx)
                     if success:
                         if final_client: update_company_category_in_sheet(final_client, final_cat)
                         st.balloons()
@@ -556,8 +590,17 @@ def main():
                 
                 valid_cols = [c for c in TARGET_COLS if c in df_final.columns]
                 
-                st.subheader(f"📝 {selected_year} 詳細資料")
-                st.dataframe(df_final[valid_cols], use_container_width=True, hide_index=True)
+                # 簡單的編輯按鈕實現
+                st.markdown("### 📋 案件列表")
+                for idx, row in df_final.iterrows():
+                    with st.expander(f"{row.get('日期', '')} - No.{row.get('編號', '')} {row.get('客戶名稱', '')}"):
+                        st.dataframe(pd.DataFrame([row[valid_cols]]))
+                        if st.button("✏️ 編輯此筆資料", key=f"edit_{idx}"):
+                            # 這裡將包含 Thinking_Row_Index 的整行資料存入 session
+                            st.session_state['edit_data'] = row.to_dict()
+                            st.session_state['edit_mode'] = True
+                            st.session_state['current_page'] = "📝 新增業務登記"
+                            st.rerun()
             else: st.error("無日期欄位")
 
 if __name__ == "__main__":
