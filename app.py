@@ -94,7 +94,6 @@ def load_data_from_gsheet():
             client = get_google_sheet_client()
             sh = client.open_by_key(SPREADSHEET_KEY)
             
-            # 1. 公司名單 (分頁1)
             try:
                 ws_c = sh.get_worksheet(1)
                 cd = {}
@@ -107,7 +106,6 @@ def load_data_from_gsheet():
                         cd = {col: [str(x).strip() for x in df[col].values if pd.notna(x) and str(x).strip()] for col in df.columns}
             except: cd = {}
 
-            # 2. 業務紀錄 (分頁0)
             try:
                 ws_f = sh.get_worksheet(0)
                 df_b = pd.DataFrame()
@@ -126,7 +124,6 @@ def load_data_from_gsheet():
                             df_b = df_b[df_b['編號'].astype(str).str.strip() != '']
             except: df_b = pd.DataFrame()
 
-            # 3. 統編對照表 (分頁2)
             tax_map = {}
             rev_tax_map = {}
             try:
@@ -339,30 +336,20 @@ def main():
 
     # --- 定義統編欄位變更的 Callback ---
     def on_tax_id_change():
-        """當統編欄位按下 Enter 時觸發"""
         new_tax = st.session_state['widget_tax_id'].strip()
         if not new_tax: return
-        
-        # 查詢是否有對應的公司
         found_client = rev_tax_map.get(new_tax)
-        
         if found_client:
-            # 找到公司 -> 反查類別並強制設定
             found_cat = None
             def normalize_text(text): return str(text).replace('臺', '台').strip()
-            
             for cat, clients in company_dict.items():
                 if found_client in clients or normalize_text(found_client) in [normalize_text(c) for c in clients]:
-                    found_cat = cat
-                    break
-            
+                    found_cat = cat; break
             st.session_state['force_client'] = found_client
             if found_cat: st.session_state['force_cat'] = found_cat
-            # 鎖定統編值 (避免 Rerun 後消失)
             st.session_state['force_tax_id'] = new_tax
             st.session_state['tax_msg_type'] = 'success'
         else:
-            # 沒找到 -> 設定警告訊息，但保留統編值供輸入
             st.session_state['force_tax_id'] = new_tax
             st.session_state['tax_msg_type'] = 'warning'
 
@@ -374,62 +361,75 @@ def main():
         is_edit = st.session_state.get('edit_mode', False)
         edit_data = st.session_state.get('edit_data', {})
         
-        # --- 初始化：決定目標類別與客戶 ---
+        # --- 初始化 ---
         cat_options = list(company_dict.keys()) + ["➕ 新增類別..."]
-        target_cat, target_client = None, None
+        target_cat, target_client, target_tax = None, None, ""
 
-        # 1. 處理強制帶入 (來自搜尋 or 統編反查)
         if 'force_cat' in st.session_state: target_cat = st.session_state['force_cat']
         elif is_edit and '客戶類別' in edit_data: target_cat = edit_data['客戶類別']
             
         if 'force_client' in st.session_state: target_client = st.session_state['force_client']
         elif is_edit and '客戶名稱' in edit_data: target_client = edit_data['客戶名稱']
 
-        # 2. 設定選單 Index
+        if 'force_tax_id' in st.session_state: target_tax = st.session_state['force_tax_id']
+        elif is_edit and '統一編號' in edit_data: target_tax = edit_data['統一編號']
+        elif target_client in tax_map: target_tax = tax_map[target_client]
+
         default_cat_idx, default_client_idx = 0, 0
         if target_cat:
             if target_cat not in cat_options: cat_options.insert(0, target_cat)
             default_cat_idx = cat_options.index(target_cat)
             
-        # 3. 處理客戶下拉選單
-        client_options = []
-        # 先根據選擇的類別 (可能是 force 或 default) 產生清單
-        # 注意：這裡需要預先知道選了哪個類別才能產名單，但 selectbox 還沒 render
-        # 所以我們先用 target_cat 預判，如果沒有就用預設第一個
         current_cat_for_list = target_cat if target_cat else cat_options[0]
-        if current_cat_for_list == "➕ 新增類別...":
-            client_options = ["➕ 新增客戶..."]
-        else:
-            client_options = company_dict.get(current_cat_for_list, []) + ["➕ 新增客戶..."]
+        if current_cat_for_list == "➕ 新增類別...": client_options = ["➕ 新增客戶..."]
+        else: client_options = company_dict.get(current_cat_for_list, []) + ["➕ 新增客戶..."]
 
         if target_client:
             if target_client not in client_options: client_options.insert(0, target_client)
             default_client_idx = client_options.index(target_client)
 
-        # UI 標題
         form_title = f"📝 編輯紀錄 (No.{edit_data.get('編號')})" if is_edit else "📝 新增業務登記"
         if is_edit: st.success(f"✏️ 您正在編輯 **No.{edit_data.get('編號')}** 的資料，修改完畢請按下方「更新資料」按鈕。")
         else: st.subheader(form_title)
 
-        # 變數準備
+        # 預設值變數
         def_date = datetime.today()
         def_project, def_price, def_remark, def_ex_res = "", 0, "", st.session_state.get('ex_res', "")
-        has_inv_init, has_pay_init = False, False
+        
+        # 🔥 補回這裡的變數初始化！
+        has_inv_init, has_pay_init, has_del_init, has_ship_init = False, False, False, False
         def_inv_date, def_pay_date = datetime.today(), datetime.today()
+        d_del_def = datetime.today()
+        d_ship_def = datetime.today()
 
         if is_edit and edit_data:
             try:
                 if edit_data.get('日期'): 
                     d = parse_taiwan_date(edit_data['日期'])
                     if d is not pd.NaT: def_date = d
+                
+                # 預定交期
+                if edit_data.get('預定交期'):
+                    d = parse_taiwan_date(edit_data['預定交期'])
+                    if d is not pd.NaT: has_del_init = True; d_del_def = d
+                
+                # 出貨日期
+                if edit_data.get('出貨日期'):
+                    d = parse_taiwan_date(edit_data['出貨日期'])
+                    if d is not pd.NaT: has_ship_init = True; d_ship_def = d
+
+                # 發票日期
                 if edit_data.get('發票日期'):
                     dates = str(edit_data['發票日期']).split(',')
                     parsed = [parse_taiwan_date(d) for d in dates if parse_taiwan_date(d) is not pd.NaT]
                     if parsed: has_inv_init, def_inv_date = True, parsed[0]; st.session_state['inv_list'] = parsed[1:]
+                
+                # 收款日期
                 if edit_data.get('收款日期'):
                     dates = str(edit_data['收款日期']).split(',')
                     parsed = [parse_taiwan_date(d) for d in dates if parse_taiwan_date(d) is not pd.NaT]
                     if parsed: has_pay_init, def_pay_date = True, parsed[0]; st.session_state['pay_list'] = parsed[1:]
+                
                 def_project = edit_data.get('案號', "")
                 p = str(edit_data.get('完稅價格', "0")).replace(",", "")
                 def_price = int(float(p)) if p and p.replace(".","").isdigit() else 0
@@ -440,50 +440,40 @@ def main():
         with st.container(border=True):
             st.markdown("### 🏢 客戶與基本資料")
             
-            # --- 頂部搜尋欄 ---
             def normalize_text(text): return str(text).replace('臺', '台').strip()
             search_keyword = st.text_input("🔍 智慧搜尋：輸入【客戶名稱】或【統一編號】(Enter)", placeholder="例如：台積 或 12345678", key="search_input")
             
             if search_keyword:
                 search_val = normalize_text(search_keyword)
-                # 判斷是否為統編
                 if search_val.isdigit() and len(search_val) >= 8:
                     found_client_tax = rev_tax_map.get(search_val)
                     if found_client_tax:
                         st.success(f"✅ 統編識別成功！已帶入：{found_client_tax}")
                         st.session_state['force_client'] = found_client_tax
                         st.session_state['force_tax_id'] = search_val
-                        # 找類別
                         for cat, clients in company_dict.items():
                             if found_client_tax in clients or normalize_text(found_client_tax) in [normalize_text(c) for c in clients]:
                                 st.session_state['force_cat'] = cat; break
                         st.rerun()
-                    else:
-                        st.warning("⚠️ 查無此統編，請直接填寫資料。")
+                    else: st.warning("⚠️ 查無此統編，請直接填寫資料。")
                 else:
-                    # 名稱搜尋
                     matches = []
                     for cat, clients in company_dict.items():
                         for client in clients:
                             if search_val in normalize_text(client): matches.append(f"{client} ({cat})")
                     if len(matches) == 1:
-                        t = matches[0]
-                        st.success(f"✅ 已自動填入：{t}")
-                        split_idx = t.rfind(" (")
-                        f_c = t[:split_idx]; f_cat = t[split_idx+2:-1]
-                        st.session_state['force_client'] = f_c
-                        st.session_state['force_cat'] = f_cat
+                        t = matches[0]; st.success(f"✅ 已自動填入：{t}")
+                        split_idx = t.rfind(" ("); f_c = t[:split_idx]; f_cat = t[split_idx+2:-1]
+                        st.session_state['force_client'] = f_c; st.session_state['force_cat'] = f_cat
                         if f_c in tax_map: st.session_state['force_tax_id'] = tax_map[f_c]
                         st.rerun()
                     elif len(matches) > 1:
                         st.info(f"💡 找到 {len(matches)} 筆，請選擇：")
                         sel = st.selectbox("請選擇", matches, label_visibility="collapsed")
                         if sel:
-                            split_idx = sel.rfind(" (")
-                            f_c = sel[:split_idx]; f_cat = sel[split_idx+2:-1]
+                            split_idx = sel.rfind(" ("); f_c = sel[:split_idx]; f_cat = sel[split_idx+2:-1]
                             if st.session_state.get('force_client') != f_c:
-                                st.session_state['force_client'] = f_c
-                                st.session_state['force_cat'] = f_cat
+                                st.session_state['force_client'] = f_c; st.session_state['force_cat'] = f_cat
                                 if f_c in tax_map: st.session_state['force_tax_id'] = tax_map[f_c]
                                 st.rerun()
                     else: st.warning("❌ 找不到符合的客戶")
@@ -493,27 +483,26 @@ def main():
             with c1:
                 input_date = st.date_input("📅 填表日期", def_date)
                 
-                # --- 下拉選單 ---
-                selected_cat = st.selectbox("📂 客戶類別", cat_options, index=default_cat_idx, key="cat_box")
+                current_cat_val = st.session_state.get('cat_box')
+                if current_cat_val and current_cat_val not in cat_options: cat_options.insert(0, current_cat_val)
                 
-                # 重新根據選到的類別更新客戶清單 (如果使用者手動切換了類別)
+                selected_cat = st.selectbox("📂 客戶類別", cat_options, index=default_cat_idx, key="cat_box")
                 if selected_cat != current_cat_for_list:
                     if selected_cat == "➕ 新增類別...": client_options = ["➕ 新增客戶..."]
                     else: client_options = company_dict.get(selected_cat, []) + ["➕ 新增客戶..."]
-                    default_client_idx = 0 # 重置 index
+                    default_client_idx = 0 
 
-                if selected_cat == "➕ 新增類別...":
-                    final_cat = st.text_input("✍️ 請輸入新類別名稱")
+                if selected_cat == "➕ 新增類別...": final_cat = st.text_input("✍️ 請輸入新類別名稱")
                 else: final_cat = selected_cat
 
+                current_client_val = st.session_state.get('client_box')
+                if current_client_val and current_client_val not in client_options: client_options.insert(0, current_client_val)
+
                 selected_client = st.selectbox("👤 客戶名稱", client_options, index=default_client_idx, key="client_box")
-                
-                if selected_client == "➕ 新增客戶...":
-                    final_client = st.text_input("✍️ 請輸入新客戶名稱")
+                if selected_client == "➕ 新增客戶...": final_client = st.text_input("✍️ 請輸入新客戶名稱")
                 else: final_client = selected_client
 
-                # 清除一次性強制變數
-                keys_to_clear = ['force_cat', 'force_client'] 
+                keys_to_clear = ['force_cat', 'force_client']; 
                 for k in keys_to_clear: 
                     if k in st.session_state: del st.session_state[k]
 
@@ -521,72 +510,41 @@ def main():
                 if is_edit: current_id = edit_data.get('編號'); st.metric(label="✨ 編輯案件編號", value=f"No. {current_id}")
                 else: next_id = calculate_next_id(df_business, input_date.year); st.metric(label=f"✨ {input_date.year} 新案件編號", value=f"No. {next_id}", delta="Auto")
                 
-                # --- 統編欄位邏輯 ---
-                # 1. 判斷是否有強制寫入的統編 (來自 Enter 反查 or 搜尋)
-                if 'force_tax_id' in st.session_state:
-                    current_tax_val = st.session_state['force_tax_id']
-                
-                # 2. 若無強制，則檢查「是否切換了客戶」導致需要自動帶入舊統編
+                if 'force_tax_id' in st.session_state: current_tax_val = st.session_state['force_tax_id']
                 else:
-                    # 紀錄上一次的客戶，若變更則刷新統編欄位
                     if 'last_client_check' not in st.session_state: st.session_state['last_client_check'] = ""
-                    
                     if final_client != st.session_state['last_client_check']:
-                        # 客戶變了，去查表
-                        if final_client in tax_map:
-                            current_tax_val = tax_map[final_client]
-                        else:
-                            current_tax_val = "" # 新客戶或無統編，清空
-                        
-                        # 更新到 widget state
+                        current_tax_val = tax_map[final_client] if final_client in tax_map else ""
                         st.session_state['widget_tax_id'] = current_tax_val
                         st.session_state['last_client_check'] = final_client
                     else:
-                        # 客戶沒變，保持 widget 原有狀態 (可能是使用者手打的)
-                        # 但如果是編輯模式剛進來，需要初始化
                         if is_edit and '統一編號' in edit_data and 'widget_tax_id' not in st.session_state:
                              st.session_state['widget_tax_id'] = edit_data['統一編號']
-                        
                         current_tax_val = st.session_state.get('widget_tax_id', "")
 
-                # 確保 widget_tax_id 存在於 session 以供 callback 使用
-                if 'widget_tax_id' not in st.session_state:
-                    st.session_state['widget_tax_id'] = current_tax_val
+                if 'widget_tax_id' not in st.session_state: st.session_state['widget_tax_id'] = current_tax_val
 
-                # 3. 渲染 Widget
-                final_tax_id = st.text_input(
-                    "🏢 統一編號 (可自動記憶)", 
-                    key="widget_tax_id", # 使用 session state 控制值
-                    on_change=on_tax_id_change, # 綁定 Enter 事件
-                    placeholder="輸入統編後按 Enter 可反查"
-                )
+                final_tax_id = st.text_input("🏢 統一編號 (可自動記憶)", key="widget_tax_id", on_change=on_tax_id_change, placeholder="輸入統編後按 Enter 可反查")
 
-                # 4. 顯示狀態訊息
-                if st.session_state.get('tax_msg_type') == 'success':
-                    st.success("✅ 已自動帶入對應客戶資料")
-                    st.session_state['tax_msg_type'] = None # 顯示一次後清除
-                elif st.session_state.get('tax_msg_type') == 'warning':
-                    st.warning("⚠️ 沒有登記該公司，請新增客戶名稱及類別")
-                    st.session_state['tax_msg_type'] = None
+                if st.session_state.get('tax_msg_type') == 'success': st.success("✅ 已自動帶入對應客戶資料"); st.session_state['tax_msg_type'] = None
+                elif st.session_state.get('tax_msg_type') == 'warning': st.warning("⚠️ 沒有登記該公司，請新增客戶名稱及類別"); st.session_state['tax_msg_type'] = None
 
-                # 清除 force_tax_id 以免鎖死輸入框
                 if 'force_tax_id' in st.session_state: del st.session_state['force_tax_id']
 
                 project_no = st.text_input("🔖 案號 / 產品名稱", value=def_project)
                 price = st.number_input("💰 完稅價格 (TWD)", min_value=0, step=1000, format="%d", value=def_price)
 
-        with st.container(border=True):
-             remark = st.text_area("📝 備註", height=80, value=def_remark)
+        with st.container(border=True): remark = st.text_area("📝 備註", height=80, value=def_remark)
 
         with st.container(border=True):
             st.markdown("### ⏰ 時程與財務設定")
             d1, d2, d3, d4 = st.columns(4)
             with d1: 
                 has_delivery = st.checkbox("已有預定交期?", value=has_del_init)
-                ex_del = st.date_input("🚚 預定交期", d_del_def if has_del_init else datetime.today()) if has_delivery else None
+                ex_del = st.date_input("🚚 預定交期", d_del_def) if has_delivery else None
             with d2:
                 has_ship = st.checkbox("已有出貨日期?", value=has_ship_init)
-                ship_d = st.date_input("🚚 出貨日期", d_ship_def if has_ship_init else datetime.today()) if has_ship else None
+                ship_d = st.date_input("🚚 出貨日期", d_ship_def) if has_ship else None
             with d3:
                 has_invoice = st.checkbox("已有發票?", value=has_inv_init)
                 if has_invoice:
@@ -605,9 +563,9 @@ def main():
                 if has_payment:
                     primary_pay_date = st.date_input("💰 收款日期", def_pay_date)
                     with st.expander("➕ 新增更多"):
-                        c_pick, c_add = st.columns([3, 1])
-                        with c_pick: new_pay_date = st.date_input("選日期", datetime.today(), key="pick_pay", label_visibility="collapsed")
-                        with c_add:
+                        c_pick_p, c_add_p = st.columns([3, 1])
+                        with c_pick_p: new_pay_date = st.date_input("選日期", datetime.today(), key="pick_pay", label_visibility="collapsed")
+                        with c_add_p:
                             if st.button("加", key="add_pay"):
                                 if new_pay_date not in st.session_state['pay_list']: st.session_state['pay_list'].append(new_pay_date); st.session_state['pay_list'].sort()
                         if st.session_state['pay_list']:
@@ -677,16 +635,13 @@ def main():
                 
                 with st.spinner("資料儲存處理中..."):
                     success, msg = smart_save_record(data_to_save, is_update=is_edit)
-                    
                     if success:
                         msg_list = [msg]
                         if final_client:
                             update_company_category_in_sheet(final_client, final_cat)
                             if final_tax_id: update_tax_id_in_sheet(final_client, final_tax_id)
-                        
                         st.balloons()
                         st.success(" | ".join(msg_list))
-                        
                         st.session_state['ex_res'] = ""
                         st.session_state['inv_list'] = []
                         st.session_state['pay_list'] = []
@@ -704,7 +659,6 @@ def main():
     # ========================================================
     elif st.session_state['current_page'] == "📊 數據戰情室":
         st.title("📊 數據戰情室")
-        
         if df_business.empty: st.info("目前尚無資料。")
         else:
             df_clean = df_business.copy()
@@ -718,10 +672,8 @@ def main():
                 df_clean['parsed_date'] = df_clean[date_col].apply(parse_taiwan_date)
                 df_valid = df_clean.dropna(subset=['parsed_date']).copy()
                 df_valid['Year'] = df_valid['parsed_date'].dt.year
-                
                 all_years = sorted(df_valid['Year'].unique().astype(int), reverse=True)
                 selected_year = st.selectbox("📅 請選擇年份", all_years)
-                
                 df_final = df_valid[df_valid['Year'] == selected_year].sort_values(by='parsed_date', ascending=False)
                 
                 total_rev = df_final[price_col].sum() if price_col else 0
@@ -760,7 +712,6 @@ def main():
                     row_dict = df_final.iloc[selected_index].to_dict()
                     for k, v in row_dict.items():
                         if isinstance(v, (pd.Timestamp, datetime)): row_dict[k] = v.strftime('%Y-%m-%d')
-                    
                     st.session_state['edit_mode'] = True
                     st.session_state['edit_data'] = row_dict
                     st.session_state['current_page'] = "📝 新增業務登記"
@@ -768,7 +719,6 @@ def main():
                     if '客戶類別' in row_dict: st.session_state['force_cat'] = str(row_dict['客戶類別']).strip()
                     if '客戶名稱' in row_dict: st.session_state['force_client'] = str(row_dict['客戶名稱']).strip()
                     if '統一編號' in row_dict: st.session_state['force_tax_id'] = str(row_dict['統一編號']).strip()
-                    
                     st.session_state['search_input'] = ""
                     st.rerun()
             else: st.error("資料表中找不到日期欄位，無法分析。")
