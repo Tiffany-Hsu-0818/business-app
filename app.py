@@ -6,57 +6,60 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import os
 import json
-import plotly.express as px
 
-# 嘗試匯入 yfinance
+# 嘗試匯入 yfinance，失敗則略過
 try:
     import yfinance as yf
 except ImportError:
-    pass # 允許在沒有 yfinance 的情況下執行
+    pass
 
 # ==========================================
 # 📍 設定區
 # ==========================================
 SPREADSHEET_KEY = '1Q1-JbHje0E-8QB0pu83OHN8jCPY8We9l2j1_7eZ8yas'
 
-# 初始化 Session State
-if 'current_page' not in st.session_state: st.session_state['current_page'] = "📝 新增業務登記"
-if 'edit_mode' not in st.session_state: st.session_state['edit_mode'] = False
-if 'edit_data' not in st.session_state: st.session_state['edit_data'] = {}
-if 'ex_res' not in st.session_state: st.session_state['ex_res'] = ""
-if 'inv_list' not in st.session_state: st.session_state['inv_list'] = []
-if 'pay_list' not in st.session_state: st.session_state['pay_list'] = []
+# 初始化 Session State (確保變數存在)
+defaults = {
+    'current_page': "📝 新增業務登記",
+    'edit_mode': False,
+    'edit_data': {},
+    'ex_res': "",
+    'inv_list': [],
+    'pay_list': [],
+    'search_input': "",
+    'tax_id_input': "" # 獨立的統編輸入變數
+}
+
+for key, val in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = val
 
 # ==========================================
-# ☁️ Google Sheets 連線與工具函式
+# ☁️ Google Sheets 連線 (加強穩定性)
 # ==========================================
+@st.cache_resource
 def get_google_sheet_client():
+    """建立連線物件 (使用 cache_resource 避免重複連線)"""
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    for attempt in range(3):
+    creds = None
+    
+    # 嘗試從 secrets 讀取
+    if "gcp_service_account" in st.secrets:
         try:
-            if "gcp_service_account" in st.secrets:
-                key_dict = json.loads(st.secrets["gcp_service_account"]["json_content"])
-                creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
-            else:
-                local_key_file = r'service_account.json'
-                if os.path.exists(local_key_file):
-                    creds = ServiceAccountCredentials.from_json_keyfile_name(local_key_file, scope)
-                else:
-                    local_key_file_old = r'C:\Users\User\Desktop\業務登記表\service_account.json'
-                    if os.path.exists(local_key_file_old):
-                        creds = ServiceAccountCredentials.from_json_keyfile_name(local_key_file_old, scope)
-                    else:
-                        st.error("❌ 找不到金鑰檔案 (service_account.json)！")
-                        st.stop()
-            return gspread.authorize(creds)
-        except Exception as e:
-            if "503" in str(e):
-                time.sleep(2)
-                continue
-            st.error(f"連線失敗: {e}")
-            st.stop()
-    st.error("❌ Google 伺服器忙線中")
-    st.stop()
+            key_dict = json.loads(st.secrets["gcp_service_account"]["json_content"])
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
+        except: pass
+    
+    # 嘗試從本地檔案讀取
+    if not creds:
+        local_key_file = r'service_account.json'
+        if os.path.exists(local_key_file):
+            creds = ServiceAccountCredentials.from_json_keyfile_name(local_key_file, scope)
+    
+    if not creds:
+        return None # 連線失敗回傳 None，由後續邏輯處理
+
+    return gspread.authorize(creds)
 
 def clean_headers(headers):
     cleaned = []
@@ -89,62 +92,65 @@ def parse_taiwan_date(date_str):
 
 @st.cache_data(ttl=60)
 def load_data_from_gsheet():
-    for attempt in range(3):
+    """讀取資料 (加入錯誤處理，避免白屏)"""
+    client = get_google_sheet_client()
+    if not client: return {}, pd.DataFrame(), {}, {}
+
+    try:
+        sh = client.open_by_key(SPREADSHEET_KEY)
+        
+        # 1. 公司名單
+        cd = {}
         try:
-            client = get_google_sheet_client()
-            sh = client.open_by_key(SPREADSHEET_KEY)
-            
-            try:
-                ws_c = sh.get_worksheet(1)
-                cd = {}
-                if ws_c:
-                    data = ws_c.get_all_values()
-                    if len(data) > 1:
-                        headers = clean_headers(data[0])
-                        df = pd.DataFrame(data[1:], columns=headers)
-                        df = df.replace(r'^\s*$', pd.NA, regex=True).dropna(how='all')
-                        cd = {col: [str(x).strip() for x in df[col].values if pd.notna(x) and str(x).strip()] for col in df.columns}
-            except: cd = {}
+            ws_c = sh.get_worksheet(1)
+            if ws_c:
+                data = ws_c.get_all_values()
+                if len(data) > 1:
+                    headers = clean_headers(data[0])
+                    df = pd.DataFrame(data[1:], columns=headers)
+                    df = df.replace(r'^\s*$', pd.NA, regex=True).dropna(how='all')
+                    cd = {col: [str(x).strip() for x in df[col].values if pd.notna(x) and str(x).strip()] for col in df.columns}
+        except: pass
 
-            try:
-                ws_f = sh.get_worksheet(0)
-                df_b = pd.DataFrame()
-                if ws_f:
-                    all_values = ws_f.get_all_values()
-                    header_idx = -1
-                    for i, row in enumerate(all_values[:10]):
-                        r_str = [str(r).strip() for r in row]
-                        if "編號" in r_str and "日期" in r_str:
-                            header_idx = i
-                            break
-                    if header_idx != -1 and len(all_values) > header_idx + 1:
-                        headers = clean_headers(all_values[header_idx])
-                        df_b = pd.DataFrame(all_values[header_idx+1:], columns=headers)
-                        if '編號' in df_b.columns:
-                            df_b = df_b[df_b['編號'].astype(str).str.strip() != '']
-            except: df_b = pd.DataFrame()
+        # 2. 業務紀錄
+        df_b = pd.DataFrame()
+        try:
+            ws_f = sh.get_worksheet(0)
+            if ws_f:
+                all_values = ws_f.get_all_values()
+                header_idx = -1
+                for i, row in enumerate(all_values[:10]):
+                    if "編號" in [str(r).strip() for r in row] and "日期" in [str(r).strip() for r in row]:
+                        header_idx = i; break
+                if header_idx != -1 and len(all_values) > header_idx + 1:
+                    headers = clean_headers(all_values[header_idx])
+                    df_b = pd.DataFrame(all_values[header_idx+1:], columns=headers)
+                    if '編號' in df_b.columns:
+                        df_b = df_b[df_b['編號'].astype(str).str.strip() != '']
+        except: pass
 
-            tax_map = {}
-            rev_tax_map = {}
-            try:
-                ws_t = sh.get_worksheet(2)
-                if ws_t:
-                    t_data = ws_t.get_all_values()
-                    if len(t_data) > 1:
-                        for row in t_data[1:]:
-                            if len(row) >= 2:
-                                c_name = str(row[0]).strip()
-                                c_tax = str(row[1]).strip()
-                                if c_name and c_tax:
-                                    tax_map[c_name] = c_tax
-                                    rev_tax_map[c_tax] = c_name
-            except: pass
+        # 3. 統編對照表
+        tax_map = {}
+        rev_tax_map = {}
+        try:
+            ws_t = sh.get_worksheet(2)
+            if ws_t:
+                t_data = ws_t.get_all_values()
+                if len(t_data) > 1:
+                    for row in t_data[1:]:
+                        if len(row) >= 2:
+                            c_name = str(row[0]).strip()
+                            c_tax = str(row[1]).strip()
+                            if c_name and c_tax:
+                                tax_map[c_name] = c_tax
+                                rev_tax_map[c_tax] = c_name
+        except: pass
 
-            return cd, df_b, tax_map, rev_tax_map
-        except Exception as e:
-            if "503" in str(e): time.sleep(2); continue
-            return {}, pd.DataFrame(), {}, {}
-    return {}, pd.DataFrame(), {}, {}
+        return cd, df_b, tax_map, rev_tax_map
+
+    except Exception as e:
+        # 連線嚴重錯誤時回傳空值，避免崩潰
+        return {}, pd.DataFrame(), {}, {}
 
 # ==========================================
 # 🛠️ 資料處理邏輯
@@ -153,6 +159,7 @@ def load_data_from_gsheet():
 def update_company_category_in_sheet(client_name, new_category):
     try:
         client = get_google_sheet_client()
+        if not client: return False
         sh = client.open_by_key(SPREADSHEET_KEY)
         ws = sh.get_worksheet(1) 
         all_cols = ws.get_all_values()
@@ -160,35 +167,25 @@ def update_company_category_in_sheet(client_name, new_category):
         
         headers = [h.strip() for h in all_cols[0]]
         
-        if new_category in headers:
-            new_col_idx = headers.index(new_category) + 1
+        if new_category in headers: new_col_idx = headers.index(new_category) + 1
         else:
             new_col_idx = len(headers) + 1
             ws.update_cell(1, new_col_idx, new_category)
-            headers.append(new_category)
 
         found_row, found_col = None, None
-        existing_category = None
-        
         for c_idx, col_name in enumerate(headers):
             col_vals = [row[c_idx] for row in all_cols if len(row) > c_idx]
             if client_name in col_vals:
-                r_idx = col_vals.index(client_name)
-                found_row = r_idx + 1 
-                found_col = c_idx + 1
-                existing_category = col_name
-                break
+                r_idx = col_vals.index(client_name); found_row = r_idx + 1; found_col = c_idx + 1; break
         
         if found_row and found_col:
-            if existing_category != new_category:
+            if headers[found_col-1] != new_category:
                 ws.update_cell(found_row, found_col, "")
                 new_col_values = ws.col_values(new_col_idx)
-                next_row = len(new_col_values) + 1
-                ws.update_cell(next_row, new_col_idx, client_name)
+                ws.update_cell(len(new_col_values) + 1, new_col_idx, client_name)
         else:
             new_col_values = ws.col_values(new_col_idx)
-            next_row = len(new_col_values) + 1
-            ws.update_cell(next_row, new_col_idx, client_name)
+            ws.update_cell(len(new_col_values) + 1, new_col_idx, client_name)
         return True
     except: return False
 
@@ -196,11 +193,11 @@ def update_tax_id_in_sheet(client_name, tax_id):
     if not client_name or not tax_id: return
     try:
         client = get_google_sheet_client()
+        if not client: return
         sh = client.open_by_key(SPREADSHEET_KEY)
         try: ws = sh.get_worksheet(2)
         except: return 
-        if not ws: return
-
+        
         cell = None
         try: cell = ws.find(client_name, in_column=1)
         except: pass
@@ -210,20 +207,18 @@ def update_tax_id_in_sheet(client_name, tax_id):
     except: pass
 
 def smart_save_record(data_dict, is_update=False):
+    client = get_google_sheet_client()
+    if not client: return False, "連線失敗"
+    
     for attempt in range(3):
         try:
-            client = get_google_sheet_client()
             sh = client.open_by_key(SPREADSHEET_KEY)
             ws = sh.get_worksheet(0)
-            
             all_values = ws.get_all_values()
-            headers = []
             
+            headers = []
             for i, row in enumerate(all_values[:10]):
-                r_str = [str(r).strip() for r in row]
-                if "編號" in r_str and "日期" in r_str:
-                    headers = row
-                    break
+                if "編號" in [str(r).strip() for r in row]: headers = row; break
             if not headers: return False, "找不到標題列"
 
             row_to_write = [""] * len(headers)
@@ -231,22 +226,16 @@ def smart_save_record(data_dict, is_update=False):
                 try:
                     idx = next(i for i, h in enumerate(headers) if str(h).strip() == col_name)
                     row_to_write[idx] = str(value)
-                except StopIteration: pass
+                except: pass
 
             target_id = str(data_dict.get("編號"))
 
             if is_update:
-                try:
-                    id_col_idx = headers.index("編號")
-                    id_list = ws.col_values(id_col_idx + 1)
-                    try:
-                        row_index = id_list.index(target_id) + 1
-                        ws.update(f"A{row_index}", [row_to_write], value_input_option='USER_ENTERED')
-                        return True, f"編號 {target_id} 更新成功"
-                    except ValueError:
-                        return False, "找不到原始編號，無法更新"
-                except Exception as ex:
-                    return False, str(ex)
+                id_col_idx = headers.index("編號")
+                id_list = ws.col_values(id_col_idx + 1)
+                row_index = id_list.index(target_id) + 1
+                ws.update(f"A{row_index}", [row_to_write], value_input_option='USER_ENTERED')
+                return True, f"編號 {target_id} 更新成功"
             else:
                 ws.append_row(row_to_write, value_input_option='USER_ENTERED')
                 return True, f"編號 {target_id} 新增成功"
@@ -264,8 +253,7 @@ def calculate_next_id(df_all, target_year):
     try:
         df_temp = df_all[['編號', date_col]].copy()
         df_temp['id_num'] = pd.to_numeric(df_temp['編號'], errors='coerce')
-        df_temp = df_temp.dropna(subset=['id_num'])
-
+        
         def get_strict_year(x):
             if pd.isna(x) or str(x).strip() == "": return None
             s = str(x).strip().replace(".", "/").replace("-", "/")
@@ -302,11 +290,18 @@ def get_yahoo_rate(target_currency, query_date, inverse=False):
     return None, None, "無法取得匯率"
 
 # ==========================================
-# 🚀 主程式
+# 🚀 主程式 (v6.0 穩定版)
 # ==========================================
 def main():
     st.set_page_config(page_title="雲端業務系統", layout="wide", page_icon="☁️")
     
+    # 載入資料 (失敗時不當機)
+    with st.spinner("系統連線中..."):
+        company_dict, df_business, tax_map, rev_tax_map = load_data_from_gsheet()
+
+    if not company_dict and not df_business.empty:
+        st.error("⚠️ 無法讀取公司名單，請檢查 Google Sheet 連線。")
+
     with st.sidebar:
         st.title("功能選單")
         if st.button("📝 新增業務登記", use_container_width=True):
@@ -314,9 +309,10 @@ def main():
             st.session_state['edit_mode'] = False
             st.session_state['edit_data'] = {}
             st.session_state['search_input'] = "" 
+            st.session_state['tax_id_input'] = ""
             st.session_state['inv_list'] = []
             st.session_state['pay_list'] = []
-            keys_to_clear = ['force_cat', 'force_client', 'force_tax_id', 'widget_tax_id', 'tax_msg_type']
+            keys_to_clear = ['force_cat', 'force_client', 'force_tax_id']
             for k in keys_to_clear:
                 if k in st.session_state: del st.session_state[k]
             st.rerun()
@@ -331,28 +327,6 @@ def main():
             st.cache_data.clear()
             st.rerun()
 
-    with st.spinner("資料載入中..."):
-        company_dict, df_business, tax_map, rev_tax_map = load_data_from_gsheet()
-
-    # --- 定義統編欄位變更的 Callback ---
-    def on_tax_id_change():
-        new_tax = st.session_state['widget_tax_id'].strip()
-        if not new_tax: return
-        found_client = rev_tax_map.get(new_tax)
-        if found_client:
-            found_cat = None
-            def normalize_text(text): return str(text).replace('臺', '台').strip()
-            for cat, clients in company_dict.items():
-                if found_client in clients or normalize_text(found_client) in [normalize_text(c) for c in clients]:
-                    found_cat = cat; break
-            st.session_state['force_client'] = found_client
-            if found_cat: st.session_state['force_cat'] = found_cat
-            st.session_state['force_tax_id'] = new_tax
-            st.session_state['tax_msg_type'] = 'success'
-        else:
-            st.session_state['force_tax_id'] = new_tax
-            st.session_state['tax_msg_type'] = 'warning'
-
     # ========================================================
     # 頁面 1: 業務登記
     # ========================================================
@@ -361,19 +335,15 @@ def main():
         is_edit = st.session_state.get('edit_mode', False)
         edit_data = st.session_state.get('edit_data', {})
         
-        # --- 初始化 ---
+        # --- 初始化邏輯 (避免迴圈) ---
         cat_options = list(company_dict.keys()) + ["➕ 新增類別..."]
-        target_cat, target_client, target_tax = None, None, ""
+        target_cat, target_client = None, None
 
         if 'force_cat' in st.session_state: target_cat = st.session_state['force_cat']
         elif is_edit and '客戶類別' in edit_data: target_cat = edit_data['客戶類別']
             
         if 'force_client' in st.session_state: target_client = st.session_state['force_client']
         elif is_edit and '客戶名稱' in edit_data: target_client = edit_data['客戶名稱']
-
-        if 'force_tax_id' in st.session_state: target_tax = st.session_state['force_tax_id']
-        elif is_edit and '統一編號' in edit_data: target_tax = edit_data['統一編號']
-        elif target_client in tax_map: target_tax = tax_map[target_client]
 
         default_cat_idx, default_client_idx = 0, 0
         if target_cat:
@@ -392,39 +362,28 @@ def main():
         if is_edit: st.success(f"✏️ 您正在編輯 **No.{edit_data.get('編號')}** 的資料，修改完畢請按下方「更新資料」按鈕。")
         else: st.subheader(form_title)
 
-        # 預設值變數
+        # 變數準備
         def_date = datetime.today()
         def_project, def_price, def_remark, def_ex_res = "", 0, "", st.session_state.get('ex_res', "")
-        
-        # 🔥 補回這裡的變數初始化！
         has_inv_init, has_pay_init, has_del_init, has_ship_init = False, False, False, False
         def_inv_date, def_pay_date = datetime.today(), datetime.today()
-        d_del_def = datetime.today()
-        d_ship_def = datetime.today()
+        d_del_def, d_ship_def = datetime.today(), datetime.today()
 
         if is_edit and edit_data:
             try:
                 if edit_data.get('日期'): 
                     d = parse_taiwan_date(edit_data['日期'])
                     if d is not pd.NaT: def_date = d
-                
-                # 預定交期
                 if edit_data.get('預定交期'):
                     d = parse_taiwan_date(edit_data['預定交期'])
                     if d is not pd.NaT: has_del_init = True; d_del_def = d
-                
-                # 出貨日期
                 if edit_data.get('出貨日期'):
                     d = parse_taiwan_date(edit_data['出貨日期'])
                     if d is not pd.NaT: has_ship_init = True; d_ship_def = d
-
-                # 發票日期
                 if edit_data.get('發票日期'):
                     dates = str(edit_data['發票日期']).split(',')
                     parsed = [parse_taiwan_date(d) for d in dates if parse_taiwan_date(d) is not pd.NaT]
                     if parsed: has_inv_init, def_inv_date = True, parsed[0]; st.session_state['inv_list'] = parsed[1:]
-                
-                # 收款日期
                 if edit_data.get('收款日期'):
                     dates = str(edit_data['收款日期']).split(',')
                     parsed = [parse_taiwan_date(d) for d in dates if parse_taiwan_date(d) is not pd.NaT]
@@ -443,20 +402,25 @@ def main():
             def normalize_text(text): return str(text).replace('臺', '台').strip()
             search_keyword = st.text_input("🔍 智慧搜尋：輸入【客戶名稱】或【統一編號】(Enter)", placeholder="例如：台積 或 12345678", key="search_input")
             
+            # 搜尋邏輯
             if search_keyword:
                 search_val = normalize_text(search_keyword)
+                # 統編搜尋
                 if search_val.isdigit() and len(search_val) >= 8:
                     found_client_tax = rev_tax_map.get(search_val)
                     if found_client_tax:
                         st.success(f"✅ 統編識別成功！已帶入：{found_client_tax}")
                         st.session_state['force_client'] = found_client_tax
                         st.session_state['force_tax_id'] = search_val
+                        # 找類別
                         for cat, clients in company_dict.items():
                             if found_client_tax in clients or normalize_text(found_client_tax) in [normalize_text(c) for c in clients]:
                                 st.session_state['force_cat'] = cat; break
                         st.rerun()
-                    else: st.warning("⚠️ 查無此統編，請直接填寫資料。")
+                    else:
+                        st.warning("⚠️ 查無此統編，請直接填寫資料。")
                 else:
+                    # 名稱搜尋
                     matches = []
                     for cat, clients in company_dict.items():
                         for client in clients:
@@ -483,9 +447,6 @@ def main():
             with c1:
                 input_date = st.date_input("📅 填表日期", def_date)
                 
-                current_cat_val = st.session_state.get('cat_box')
-                if current_cat_val and current_cat_val not in cat_options: cat_options.insert(0, current_cat_val)
-                
                 selected_cat = st.selectbox("📂 客戶類別", cat_options, index=default_cat_idx, key="cat_box")
                 if selected_cat != current_cat_for_list:
                     if selected_cat == "➕ 新增類別...": client_options = ["➕ 新增客戶..."]
@@ -495,14 +456,12 @@ def main():
                 if selected_cat == "➕ 新增類別...": final_cat = st.text_input("✍️ 請輸入新類別名稱")
                 else: final_cat = selected_cat
 
-                current_client_val = st.session_state.get('client_box')
-                if current_client_val and current_client_val not in client_options: client_options.insert(0, current_client_val)
-
                 selected_client = st.selectbox("👤 客戶名稱", client_options, index=default_client_idx, key="client_box")
                 if selected_client == "➕ 新增客戶...": final_client = st.text_input("✍️ 請輸入新客戶名稱")
                 else: final_client = selected_client
 
-                keys_to_clear = ['force_cat', 'force_client']; 
+                # 清除一次性強制變數
+                keys_to_clear = ['force_cat', 'force_client'] 
                 for k in keys_to_clear: 
                     if k in st.session_state: del st.session_state[k]
 
@@ -510,25 +469,24 @@ def main():
                 if is_edit: current_id = edit_data.get('編號'); st.metric(label="✨ 編輯案件編號", value=f"No. {current_id}")
                 else: next_id = calculate_next_id(df_business, input_date.year); st.metric(label=f"✨ {input_date.year} 新案件編號", value=f"No. {next_id}", delta="Auto")
                 
-                if 'force_tax_id' in st.session_state: current_tax_val = st.session_state['force_tax_id']
-                else:
-                    if 'last_client_check' not in st.session_state: st.session_state['last_client_check'] = ""
-                    if final_client != st.session_state['last_client_check']:
-                        current_tax_val = tax_map[final_client] if final_client in tax_map else ""
-                        st.session_state['widget_tax_id'] = current_tax_val
-                        st.session_state['last_client_check'] = final_client
-                    else:
-                        if is_edit and '統一編號' in edit_data and 'widget_tax_id' not in st.session_state:
-                             st.session_state['widget_tax_id'] = edit_data['統一編號']
-                        current_tax_val = st.session_state.get('widget_tax_id', "")
+                # 統編欄位處理
+                tax_val_display = ""
+                # 1. 優先使用強制帶入值
+                if 'force_tax_id' in st.session_state:
+                    tax_val_display = st.session_state['force_tax_id']
+                # 2. 其次使用編輯資料
+                elif is_edit and '統一編號' in edit_data and not st.session_state.get('tax_id_input'):
+                    tax_val_display = edit_data['統一編號']
+                # 3. 自動帶入 (如果選了舊客戶)
+                elif final_client in tax_map and not st.session_state.get('tax_id_input'):
+                    tax_val_display = tax_map[final_client]
+                
+                # 使用者輸入優先
+                if st.session_state.get('tax_id_input'):
+                    tax_val_display = st.session_state['tax_id_input']
 
-                if 'widget_tax_id' not in st.session_state: st.session_state['widget_tax_id'] = current_tax_val
-
-                final_tax_id = st.text_input("🏢 統一編號 (可自動記憶)", key="widget_tax_id", on_change=on_tax_id_change, placeholder="輸入統編後按 Enter 可反查")
-
-                if st.session_state.get('tax_msg_type') == 'success': st.success("✅ 已自動帶入對應客戶資料"); st.session_state['tax_msg_type'] = None
-                elif st.session_state.get('tax_msg_type') == 'warning': st.warning("⚠️ 沒有登記該公司，請新增客戶名稱及類別"); st.session_state['tax_msg_type'] = None
-
+                final_tax_id = st.text_input("🏢 統一編號", value=tax_val_display, key="tax_id_input", placeholder="請輸入統編")
+                
                 if 'force_tax_id' in st.session_state: del st.session_state['force_tax_id']
 
                 project_no = st.text_input("🔖 案號 / 產品名稱", value=def_project)
@@ -648,7 +606,7 @@ def main():
                         st.session_state['edit_mode'] = False
                         st.session_state['edit_data'] = {}
                         st.session_state['search_input'] = "" 
-                        if 'widget_tax_id' in st.session_state: del st.session_state['widget_tax_id']
+                        st.session_state['tax_id_input'] = ""
                         st.cache_data.clear()
                         time.sleep(2)
                         st.rerun()
