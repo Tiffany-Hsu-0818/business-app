@@ -441,7 +441,7 @@ def main():
         with st.container(border=True):
             st.markdown("### 🏢 客戶與基本資料")
             
-            # --- [2] 搜尋欄位邏輯 (修正 Dropdown 更新問題) ---
+            # --- [2] 搜尋欄位邏輯 (修正版：刪除衝突 Key) ---
             def search_submit_callback():
                 st.session_state['search_trigger'] = st.session_state.search_input
                 st.session_state.search_input = ""
@@ -507,7 +507,6 @@ def main():
 
                     cat_options = list(company_dict.keys()) + ["➕ 新增類別..."]
                     
-                    # ⚠️ 關鍵修正：強制更新 Selectbox 狀態
                     if found_cat:
                         if found_cat not in cat_options:
                              cat_options = list(company_dict.keys()) + ["➕ 新增類別..."]
@@ -515,8 +514,9 @@ def main():
                         if found_cat in cat_options:
                             # 1. 更新索引變數
                             st.session_state['form_default_cat'] = cat_options.index(found_cat)
-                            # 2. 強制覆寫 Widget 記憶狀態 (這行最重要！)
-                            st.session_state['cat_box'] = found_cat
+                            
+                            # 2. 關鍵修正：刪除舊的元件記憶，強迫使用新的 index
+                            if 'cat_box' in st.session_state: del st.session_state['cat_box']
                             
                             temp_clients = company_dict.get(found_cat, [])
                             if found_client not in temp_clients:
@@ -526,12 +526,11 @@ def main():
                             temp_clients_ui = temp_clients + ["➕ 新增客戶..."]
                             if found_client in temp_clients_ui:
                                 st.session_state['form_default_client'] = temp_clients_ui.index(found_client)
-                                st.session_state['client_box'] = found_client # 強制更新客戶欄位
+                                if 'client_box' in st.session_state: del st.session_state['client_box']
                     else:
-                        # 若沒找到類別，強制跳到「新增類別」讓使用者注意
                         last_idx = len(cat_options) - 1
                         st.session_state['form_default_cat'] = last_idx
-                        st.session_state['cat_box'] = cat_options[last_idx]
+                        if 'cat_box' in st.session_state: del st.session_state['cat_box']
 
                     st.session_state['form_default_tax'] = found_tax
                     time.sleep(1)
@@ -613,12 +612,13 @@ def main():
                                 cat_ops = list(company_dict.keys()) + ["➕ 新增類別..."]
                                 if found_cat and found_cat in cat_ops:
                                     st.session_state['form_default_cat'] = cat_ops.index(found_cat)
-                                    st.session_state['cat_box'] = found_cat # 強制更新 Selectbox
+                                    if 'cat_box' in st.session_state: del st.session_state['cat_box']
+                                    
                                     temp_clients = company_dict.get(found_cat, []) + ["➕ 新增客戶..."]
                                     if found_client not in temp_clients: temp_clients.insert(0, found_client)
                                     if found_client in temp_clients:
                                         st.session_state['form_default_client'] = temp_clients.index(found_client)
-                                        st.session_state['client_box'] = found_client # 強制更新 Selectbox
+                                        if 'client_box' in st.session_state: del st.session_state['client_box']
                                 
                                 st.rerun()
                             else: st.warning("查無此統編")
