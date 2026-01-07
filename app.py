@@ -32,8 +32,13 @@ if 'pay_list' not in st.session_state: st.session_state['pay_list'] = []
 if 'form_default_cat' not in st.session_state: st.session_state['form_default_cat'] = 0
 if 'form_default_client' not in st.session_state: st.session_state['form_default_client'] = 0
 if 'form_default_tax' not in st.session_state: st.session_state['form_default_tax'] = ""
+
 # 搜尋觸發專用變數
 if 'search_trigger' not in st.session_state: st.session_state['search_trigger'] = ""
+
+# 🔥 新增：臨時資料記憶體 (解決搜尋後刷新資料消失的問題)
+if 'temp_new_data' not in st.session_state: st.session_state['temp_new_data'] = {} 
+# 結構: {'類別名稱': ['公司A', '公司B']}
 
 # ==========================================
 # ☁️ Google Sheets 連線與工具函式
@@ -99,7 +104,6 @@ def get_worksheet_safe(sh, possible_names, index_fallback):
 # 🌍 外部 API 查詢功能
 # ==========================================
 def search_gov_company_data(tax_id):
-    """ 查詢經濟部商業發展署開放資料 """
     try:
         url = f"https://data.gcis.nat.gov.tw/od/data/api/9D17AE0D-09B5-4732-A8F4-81ADED04B679?$format=json&$filter=Business_Accounting_NO eq {tax_id}"
         response = requests.get(url, timeout=5)
@@ -116,14 +120,10 @@ def search_gov_company_data(tax_id):
     return None
 
 def auto_classify_category(company_name, existing_categories):
-    """ AI 分類器：擴充關鍵字 """
     if not company_name: return None
-    
-    # 1. 優先檢查現有類別名稱是否直接出現在公司名中
     for cat in existing_categories:
         if len(cat) >= 2 and cat in company_name: return cat
             
-    # 2. 擴充關鍵字庫
     keyword_map = {
         "營造": "工程", "建設": "工程", "工程": "工程", "土木": "工程",
         "機電": "機械設備", "機械": "機械設備", "精密": "機械設備", "工業": "機械設備", "設備": "機械設備",
@@ -138,7 +138,6 @@ def auto_classify_category(company_name, existing_categories):
     for key, val in keyword_map.items():
         if key in company_name:
             if val in existing_categories: return val
-            
     return None
 
 @st.cache_data(ttl=60)
@@ -148,7 +147,6 @@ def load_data_from_gsheet():
             client = get_google_sheet_client()
             sh = client.open_by_key(SPREADSHEET_KEY)
             
-            # 1. 公司名單
             ws_c = get_worksheet_safe(sh, ["公司名稱", "Company List"], 1)
             cd = {}
             if ws_c:
@@ -165,7 +163,6 @@ def load_data_from_gsheet():
                                 if val: clients.append(val)
                         cd[category] = clients
             
-            # 2. 業務紀錄
             ws_f = get_worksheet_safe(sh, ["業務表單", "業務資料表", "工作表1", "Sheet1"], 0)
             df_b = pd.DataFrame()
             if ws_f:
@@ -180,7 +177,6 @@ def load_data_from_gsheet():
                     df_b = pd.DataFrame(all_values[header_idx+1:], columns=headers)
                     if '編號' in df_b.columns: df_b = df_b[df_b['編號'].astype(str).str.strip() != '']
 
-            # 3. 統編對照
             ws_t = get_worksheet_safe(sh, ["統一編號", "Tax ID"], 2)
             tax_map = {}
             rev_tax_map = {}
@@ -353,7 +349,8 @@ def main():
             st.session_state['form_default_tax'] = ""
             st.session_state['inv_list'] = []
             st.session_state['pay_list'] = []
-            if 'cat_box' in st.session_state: del st.session_state['cat_box'] # 清除 Widget 快取
+            # 清除所有 Widget 記憶，確保重置
+            if 'cat_box' in st.session_state: del st.session_state['cat_box']
             if 'client_box' in st.session_state: del st.session_state['client_box']
             st.rerun()
             
@@ -365,10 +362,25 @@ def main():
         st.markdown("---")
         if st.button("🔄 強制重新整理"):
             st.cache_data.clear()
+            st.session_state['temp_new_data'] = {} # 清空臨時資料
             st.rerun()
 
     with st.spinner("資料載入中..."):
         company_dict, df_business, tax_map, rev_tax_map = load_data_from_gsheet()
+        
+        # 🔥 關鍵修正：將臨時記憶體中的新公司，合併回 company_dict
+        # 這樣即使頁面刷新，剛剛找到的新公司也不會消失
+        if 'temp_new_data' in st.session_state:
+            for temp_cat, temp_clients in st.session_state['temp_new_data'].items():
+                if temp_cat not in company_dict:
+                    company_dict[temp_cat] = temp_clients
+                else:
+                    # 合併並去重
+                    existing = company_dict[temp_cat]
+                    for tc in temp_clients:
+                        if tc not in existing:
+                            existing.insert(0, tc) # 插入最前面
+                    company_dict[temp_cat] = existing
 
     def normalize_text(text): return str(text).replace('臺', '台').strip()
 
@@ -380,7 +392,6 @@ def main():
         is_edit = st.session_state.get('edit_mode', False)
         edit_data = st.session_state.get('edit_data', {})
         
-        # --- [1] 初始化表單變數 ---
         def_date = datetime.today()
         def_project, def_price, def_remark, def_ex_res = "", 0, "", st.session_state.get('ex_res', "")
         has_inv_init, has_pay_init, has_del_init, has_ship_init = False, False, False, False
@@ -441,7 +452,6 @@ def main():
         with st.container(border=True):
             st.markdown("### 🏢 客戶與基本資料")
             
-            # --- [2] 搜尋欄位邏輯 (修正版：刪除衝突 Key) ---
             def search_submit_callback():
                 st.session_state['search_trigger'] = st.session_state.search_input
                 st.session_state.search_input = ""
@@ -498,34 +508,35 @@ def main():
                                 found_source = "內部資料庫 (統編表)"
                                 break
 
-                # 處理搜尋結果
                 if found_client:
                     msg = f"✅ [{found_source}] 識別成功！\n\n公司：{found_client}"
                     if found_cat: msg += f"\n類別：{found_cat}"
                     else: msg += "\n⚠️ 類別：(未自動分類，請手動選擇)"
                     st.success(msg)
 
+                    # 🔥 關鍵：將新發現的資料存入臨時記憶，避免刷新後消失
+                    if found_cat:
+                        if found_cat not in st.session_state['temp_new_data']:
+                            st.session_state['temp_new_data'][found_cat] = []
+                        if found_client not in st.session_state['temp_new_data'][found_cat]:
+                            st.session_state['temp_new_data'][found_cat].append(found_client)
+
+                        # 更新 company_dict (為了當下的計算)
+                        if found_cat not in company_dict: company_dict[found_cat] = []
+                        if found_client not in company_dict[found_cat]:
+                            company_dict[found_cat].insert(0, found_client)
+
                     cat_options = list(company_dict.keys()) + ["➕ 新增類別..."]
                     
                     if found_cat:
-                        if found_cat not in cat_options:
-                             cat_options = list(company_dict.keys()) + ["➕ 新增類別..."]
-                        
                         if found_cat in cat_options:
-                            # 1. 更新索引變數
                             st.session_state['form_default_cat'] = cat_options.index(found_cat)
-                            
-                            # 2. 關鍵修正：刪除舊的元件記憶，強迫使用新的 index
+                            # 🔥 關鍵：徹底清除兩個下拉選單的記憶，強迫它們讀取新的 index
                             if 'cat_box' in st.session_state: del st.session_state['cat_box']
                             
-                            temp_clients = company_dict.get(found_cat, [])
-                            if found_client not in temp_clients:
-                                temp_clients.insert(0, found_client)
-                                company_dict[found_cat] = temp_clients
-                            
-                            temp_clients_ui = temp_clients + ["➕ 新增客戶..."]
-                            if found_client in temp_clients_ui:
-                                st.session_state['form_default_client'] = temp_clients_ui.index(found_client)
+                            temp_clients = company_dict.get(found_cat, []) + ["➕ 新增客戶..."]
+                            if found_client in temp_clients:
+                                st.session_state['form_default_client'] = temp_clients.index(found_client)
                                 if 'client_box' in st.session_state: del st.session_state['client_box']
                     else:
                         last_idx = len(cat_options) - 1
@@ -543,7 +554,6 @@ def main():
             with c1:
                 input_date = st.date_input("📅 填表日期", def_date)
                 
-                # --- [3] 下拉選單 ---
                 cat_options = list(company_dict.keys()) + ["➕ 新增類別..."]
                 if not cat_options: cat_options = ["➕ 新增類別..."]
 
@@ -580,7 +590,6 @@ def main():
                 if is_edit: current_id = edit_data.get('編號'); st.metric(label="✨ 編輯案件編號", value=f"No. {current_id}")
                 else: next_id = calculate_next_id(df_business, input_date.year); st.metric(label=f"✨ {input_date.year} 新案件編號", value=f"No. {next_id}", delta="Auto")
                 
-                # --- [4] 統編欄位 ---
                 col_tax_input, col_tax_btn = st.columns([3, 1])
                 with col_tax_input:
                     final_tax_id = st.text_input("🏢 統一編號", value=st.session_state['form_default_tax'], key="tax_input_field")
@@ -609,17 +618,24 @@ def main():
                                         st.success(f"政府資料：{found_client}")
 
                             if found_client:
+                                # 同樣套用新邏輯：存入記憶 + 清除 Selectbox
+                                if found_cat:
+                                    if found_cat not in st.session_state['temp_new_data']: st.session_state['temp_new_data'][found_cat] = []
+                                    if found_client not in st.session_state['temp_new_data'][found_cat]:
+                                        st.session_state['temp_new_data'][found_cat].append(found_client)
+                                    
+                                    if found_cat not in company_dict: company_dict[found_cat] = []
+                                    if found_client not in company_dict[found_cat]: company_dict[found_cat].insert(0, found_client)
+
                                 cat_ops = list(company_dict.keys()) + ["➕ 新增類別..."]
                                 if found_cat and found_cat in cat_ops:
                                     st.session_state['form_default_cat'] = cat_ops.index(found_cat)
                                     if 'cat_box' in st.session_state: del st.session_state['cat_box']
                                     
                                     temp_clients = company_dict.get(found_cat, []) + ["➕ 新增客戶..."]
-                                    if found_client not in temp_clients: temp_clients.insert(0, found_client)
                                     if found_client in temp_clients:
                                         st.session_state['form_default_client'] = temp_clients.index(found_client)
                                         if 'client_box' in st.session_state: del st.session_state['client_box']
-                                
                                 st.rerun()
                             else: st.warning("查無此統編")
 
@@ -750,7 +766,8 @@ def main():
                         if 'edit_loaded' in st.session_state: del st.session_state['edit_loaded']
                         if 'cat_box' in st.session_state: del st.session_state['cat_box']
                         if 'client_box' in st.session_state: del st.session_state['client_box']
-                        
+                        if 'temp_new_data' in st.session_state: st.session_state['temp_new_data'] = {} # 存檔成功後清空臨時記憶
+
                         st.cache_data.clear()
                         time.sleep(2)
                         st.rerun()
