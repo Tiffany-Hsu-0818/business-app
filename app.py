@@ -92,7 +92,7 @@ def load_data_from_gsheet():
             client = get_google_sheet_client()
             sh = client.open_by_key(SPREADSHEET_KEY)
             
-            # 1. 公司名單
+            # 1. 公司名單 (Worksheet 1)
             try:
                 ws_c = sh.get_worksheet(1)
                 cd = {}
@@ -105,7 +105,7 @@ def load_data_from_gsheet():
                         cd = {col: [str(x).strip() for x in df[col].values if pd.notna(x) and str(x).strip()] for col in df.columns}
             except: cd = {}
 
-            # 2. 業務紀錄
+            # 2. 業務紀錄 (Worksheet 0)
             try:
                 ws_f = sh.get_worksheet(0)
                 df_b = pd.DataFrame()
@@ -121,7 +121,8 @@ def load_data_from_gsheet():
                         if '編號' in df_b.columns: df_b = df_b[df_b['編號'].astype(str).str.strip() != '']
             except: df_b = pd.DataFrame()
 
-            # 3. 統編對照
+            # 3. 統編對照 (Worksheet 2)
+            # ⚠️ 修改重點：配合附件結構 [類別, 名稱, 統編]
             tax_map = {}
             rev_tax_map = {}
             try:
@@ -130,9 +131,10 @@ def load_data_from_gsheet():
                     t_data = ws_t.get_all_values()
                     if len(t_data) > 1:
                         for row in t_data[1:]:
-                            if len(row) >= 2:
-                                c_name = str(row[0]).strip()
-                                c_tax = str(row[1]).strip()
+                            # 我們需要讀取第2欄(索引1)當名稱，第3欄(索引2)當統編
+                            if len(row) >= 3:
+                                c_name = str(row[1]).strip()
+                                c_tax = str(row[2]).strip()
                                 if c_name and c_tax:
                                     tax_map[c_name] = c_tax
                                     rev_tax_map[c_tax] = c_name
@@ -181,6 +183,7 @@ def update_company_category_in_sheet(client_name, new_category):
     except: return False
 
 def update_tax_id_in_sheet(client_name, tax_id):
+    # ⚠️ 修改重點：寫入時配合 [類別, 名稱, 統編] 結構
     if not client_name or not tax_id: return
     try:
         client = get_google_sheet_client()
@@ -190,11 +193,18 @@ def update_tax_id_in_sheet(client_name, tax_id):
         if not ws: return
 
         cell = None
-        try: cell = ws.find(client_name, in_column=1)
+        try: 
+            # 名稱位於第 2 欄 (Column B)
+            cell = ws.find(client_name, in_column=2)
         except: pass
 
-        if cell: ws.update_cell(cell.row, 2, str(tax_id))
-        else: ws.append_row([client_name, str(tax_id)])
+        if cell: 
+            # 找到名稱，更新第 3 欄 (Column C) 的統編
+            ws.update_cell(cell.row, 3, str(tax_id))
+        else: 
+            # 沒找到，新增一行。
+            # 格式：[類別(空), 公司名稱, 統一編號]
+            ws.append_row(["", client_name, str(tax_id)])
     except: pass
 
 def smart_save_record(data_dict, is_update=False):
@@ -439,8 +449,7 @@ def main():
                     cat_options = list(company_dict.keys()) + ["➕ 新增類別..."]
                     if found_cat in cat_options:
                         st.session_state['form_default_cat'] = cat_options.index(found_cat)
-                        # 客戶 index 需動態計算，這裡先設為 0，或需更複雜邏輯，暫時簡化
-                        # 更好的方式是只更新 cat，讓使用者自己選 client，或者如果我們確信 client 存在：
+                        # 客戶 index 需動態計算
                         temp_clients = company_dict.get(found_cat, []) + ["➕ 新增客戶..."]
                         if found_client in temp_clients:
                             st.session_state['form_default_client'] = temp_clients.index(found_client)
