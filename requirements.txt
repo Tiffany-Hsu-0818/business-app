@@ -5,3 +5,4 @@ oauth2client
 yfinance
 requests
 plotly
+requests

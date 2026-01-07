@@ -7,6 +7,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import os
 import json
 import plotly.express as px
+import requests  # 新增：用於呼叫政府 API
 
 # 嘗試匯入 yfinance
 try:
@@ -94,6 +95,74 @@ def get_worksheet_safe(sh, possible_names, index_fallback):
     try: return sh.get_worksheet(index_fallback)
     except: return None
 
+# ==========================================
+# 🌍 外部 API 查詢功能 (挑戰極限區)
+# ==========================================
+def search_gov_company_data(tax_id):
+    """
+    查詢經濟部商業發展署開放資料
+    """
+    try:
+        # 經濟部公司登記 API (搜尋統一編號)
+        url = f"https://data.gcis.nat.gov.tw/od/data/api/9D17AE0D-09B5-4732-A8F4-81ADED04B679?$format=json&$filter=Business_Accounting_NO eq {tax_id}"
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if data and len(data) > 0:
+                return data[0].get("Company_Name", "")
+        
+        # 如果公司登記沒找到，嘗試商業登記 API
+        url_biz = f"https://data.gcis.nat.gov.tw/od/data/api/426D5542-5F05-43EB-83F9-F1300F14E1F1?$format=json&$filter=Business_Accounting_NO eq {tax_id}"
+        response = requests.get(url_biz, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if data and len(data) > 0:
+                return data[0].get("Business_Name", "")
+                
+    except Exception as e:
+        print(f"API Error: {e}")
+    return None
+
+def auto_classify_category(company_name, existing_categories):
+    """
+    簡單的 AI 分類器：檢查公司名稱是否包含現有類別的關鍵字
+    """
+    if not company_name: return None
+    
+    # 1. 完全包含 (例如：XX工程有限公司 -> 工程)
+    for cat in existing_categories:
+        # 排除太短的類別避免誤判 (例如 '無' 或 '其他')
+        if len(cat) >= 2 and cat in company_name:
+            return cat
+            
+    # 2. 常見關鍵字對映 (可以自行擴充)
+    keyword_map = {
+        "營造": "工程",
+        "建設": "工程",
+        "機電": "機械設備",
+        "機械": "機械設備",
+        "電力": "能源電力",
+        "發電": "能源電力",
+        "能源": "能源電力",
+        "客運": "交通運輸",
+        "海運": "交通運輸",
+        "物流": "交通運輸",
+        "捷運": "交通運輸",
+        "鐵路": "交通運輸",
+        "科技": "電子家電", # 或軟體科技，視情況
+        "資訊": "軟體科技",
+        "實業": "五金", # 實業太廣泛，設個機率高的
+        "企業": "貿易"  # 同上
+    }
+    
+    for key, val in keyword_map.items():
+        if key in company_name:
+            # 只有當對映的類別真的存在於 Google Sheet 時才回傳
+            if val in existing_categories:
+                return val
+            
+    return None
+
 @st.cache_data(ttl=60)
 def load_data_from_gsheet():
     for attempt in range(3):
@@ -140,7 +209,6 @@ def load_data_from_gsheet():
             
             if ws_t:
                 t_data = ws_t.get_all_values()
-                # 結構: [Col 0: 類別, Col 1: 名稱, Col 2: 統編]
                 if len(t_data) > 1:
                     for row in t_data[1:]:
                         if len(row) >= 3:
@@ -395,37 +463,48 @@ def main():
         with st.container(border=True):
             st.markdown("### 🏢 客戶與基本資料")
             
-            # --- [2] 搜尋欄位邏輯 (安全性修正版) ---
+            # --- [2] 搜尋欄位邏輯 (結合政府 API) ---
             def search_submit_callback():
-                # 將輸入值移交給 trigger 變數，並清空輸入框
                 st.session_state['search_trigger'] = st.session_state.search_input
                 st.session_state.search_input = ""
 
-            st.text_input("🔍 智慧搜尋：輸入【客戶名稱】或【統一編號】(Enter)", 
-                          placeholder="例如：亞泰 或 02351924", 
+            st.text_input("🔍 超級搜尋：輸入【客戶名稱】或【統一編號】(自動聯網)", 
+                          placeholder="例如：台積電 或 12345678", 
                           key="search_input", 
                           on_change=search_submit_callback)
             
-            # 檢查是否有待處理的搜尋
             if st.session_state['search_trigger']:
                 search_val = normalize_text(st.session_state['search_trigger'])
-                # 使用完畢立即清空 trigger，避免無窮迴圈
-                st.session_state['search_trigger'] = ""
+                st.session_state['search_trigger'] = "" # Reset
                 
                 found_cat, found_client, found_tax = None, None, ""
-                
+                found_source = ""
+
                 # 1. 統編搜尋 (優先)
                 if search_val.isdigit() and len(search_val) >= 8:
+                    # A. 先查內部資料 (Google Sheet)
                     info = rev_tax_map.get(search_val)
                     if info:
                         found_client = info['name']
                         found_cat = info['cat']
                         found_tax = search_val
-                        st.success(f"✅ 統編識別成功！\n\n公司：{found_client}\n類別：{found_cat}")
+                        found_source = "內部資料庫"
                     else:
-                        st.warning("⚠️ 查無此統編，請確認是否已建檔。")
+                        # B. 內部沒有，查外部政府 API (挑戰極限功能)
+                        with st.spinner("正在連線至經濟部商業司資料庫..."):
+                            gov_name = search_gov_company_data(search_val)
+                            if gov_name:
+                                found_client = gov_name
+                                found_tax = search_val
+                                found_source = "政府開放資料"
+                                # C. 自動分類 (AI Guess)
+                                existing_cats = list(company_dict.keys())
+                                found_cat = auto_classify_category(found_client, existing_cats)
+                                if not found_cat:
+                                    # 如果沒分類到，可以設為預設值，這裡設為空讓使用者自己選，或選 '➕ 新增類別...'
+                                    pass 
                 
-                # 2. 名稱搜尋
+                # 2. 名稱搜尋 (純內部)
                 else:
                     matches = []
                     for cat, clients in company_dict.items():
@@ -435,41 +514,58 @@ def main():
                     if len(matches) == 1:
                         found_cat, found_client = matches[0]
                         if found_client in tax_map: found_tax = tax_map[found_client]
-                        st.success(f"✅ 已自動填入：{found_client}")
+                        found_source = "內部資料庫"
                     elif len(matches) > 1:
                         st.info(f"💡 找到 {len(matches)} 筆符合資料，請輸入更完整名稱。")
                     else:
+                         # 嘗試查統編表
                         for name, tax in tax_map.items():
                             if search_val in normalize_text(name):
                                 found_client = name
                                 found_tax = tax
                                 info = rev_tax_map.get(tax)
                                 if info: found_cat = info['cat']
-                                st.success(f"✅ 從統編表找到公司：{found_client}")
+                                found_source = "內部資料庫 (統編表)"
                                 break
-                        if not found_client:
-                            st.warning("❌ 找不到符合的客戶")
 
-                # 若搜尋成功，更新 Session State
-                if found_cat and found_client:
+                # 處理搜尋結果
+                if found_client:
+                    msg = f"✅ [{found_source}] 識別成功！\n\n公司：{found_client}"
+                    if found_cat: msg += f"\n類別：{found_cat}"
+                    else: msg += "\n⚠️ 類別：(未自動分類，請手動選擇)"
+                    st.success(msg)
+
+                    # 更新 UI 狀態
                     cat_options = list(company_dict.keys()) + ["➕ 新增類別..."]
-                    if found_cat not in cat_options:
-                        company_dict[found_cat] = [found_client]
-                        cat_options = list(company_dict.keys()) + ["➕ 新增類別..."]
-
-                    if found_cat in cat_options:
-                        st.session_state['form_default_cat'] = cat_options.index(found_cat)
-                        temp_clients = company_dict.get(found_cat, [])
-                        if found_client not in temp_clients:
-                            temp_clients.append(found_client)
-                            company_dict[found_cat] = temp_clients
-                        
-                        temp_clients_ui = temp_clients + ["➕ 新增客戶..."]
-                        if found_client in temp_clients_ui:
-                            st.session_state['form_default_client'] = temp_clients_ui.index(found_client)
                     
+                    # 如果是新發現的公司且有分類
+                    if found_cat:
+                        if found_cat not in cat_options:
+                            # 這種情況理論上少見，除非 auto_classify 邏輯變了，但為求保險
+                            cat_options = list(company_dict.keys()) + ["➕ 新增類別..."]
+                        
+                        if found_cat in cat_options:
+                            st.session_state['form_default_cat'] = cat_options.index(found_cat)
+                            temp_clients = company_dict.get(found_cat, [])
+                            # 暫時將新公司加入選單 (尚未寫入 Google Sheet，存檔時才會寫)
+                            if found_client not in temp_clients:
+                                temp_clients.insert(0, found_client)
+                                company_dict[found_cat] = temp_clients # 更新記憶體中的 dict
+                            
+                            temp_clients_ui = temp_clients + ["➕ 新增客戶..."]
+                            if found_client in temp_clients_ui:
+                                st.session_state['form_default_client'] = temp_clients_ui.index(found_client)
+                    else:
+                        # 沒分類到，類別歸零，但統編和名稱要記住嗎？
+                        # 這邊選擇不強制切換類別，讓使用者自己選，但可以先把名稱存入 Session 供後續邏輯使用
+                        st.session_state['form_default_cat'] = len(cat_options) - 1 # 預設跳到新增類別? 或保留原樣
+                        # 更好的做法：不做任何選單變動，讓使用者自己填，但填入統編
+                        
                     st.session_state['form_default_tax'] = found_tax
+                    time.sleep(1) # 讓使用者看一下成功訊息
                     st.rerun()
+                elif search_val and not found_client:
+                    st.warning("❌ 查無資料 (內部與政府資料庫皆無紀錄)")
 
             st.markdown("---")
             c1, c2 = st.columns(2)
@@ -526,23 +622,36 @@ def main():
                     if st.button("🔍 反查"):
                         tax_to_check = st.session_state['form_default_tax'].strip()
                         if tax_to_check:
+                            found_client, found_cat = None, None
+                            
+                            # 1. 內部查
                             info = rev_tax_map.get(tax_to_check)
                             if info:
                                 found_client = info['name']
                                 found_cat = info['cat']
+                                st.success(f"內部資料：{found_client}")
+                            else:
+                                # 2. 外部查 (按鈕也可以觸發 API)
+                                with st.spinner("查詢政府資料庫..."):
+                                    gov_name = search_gov_company_data(tax_to_check)
+                                    if gov_name:
+                                        found_client = gov_name
+                                        existing_cats = list(company_dict.keys())
+                                        found_cat = auto_classify_category(found_client, existing_cats)
+                                        st.success(f"政府資料：{found_client}")
+
+                            if found_client:
                                 cat_ops = list(company_dict.keys()) + ["➕ 新增類別..."]
-                                if found_cat not in cat_ops:
-                                    company_dict[found_cat] = [found_client]
-                                    cat_ops = list(company_dict.keys()) + ["➕ 新增類別..."]
                                 
-                                if found_cat in cat_ops:
+                                # 更新分類
+                                if found_cat and found_cat in cat_ops:
                                     st.session_state['form_default_cat'] = cat_ops.index(found_cat)
                                     temp_clients = company_dict.get(found_cat, []) + ["➕ 新增客戶..."]
+                                    
                                     if found_client not in temp_clients: temp_clients.insert(0, found_client)
                                     if found_client in temp_clients:
                                         st.session_state['form_default_client'] = temp_clients.index(found_client)
                                 
-                                st.success(f"已帶入：{found_client} ({found_cat})")
                                 st.rerun()
                             else: st.warning("查無此統編")
 
